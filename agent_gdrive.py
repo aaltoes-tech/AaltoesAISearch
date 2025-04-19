@@ -17,16 +17,9 @@ Agentic RAG with ChromaDB
     # Essential Args
     # For anthropic: change args below to 'LiteLLM', 'anthropic/claude-3-5-sonnet-20240620' and "ANTHROPIC_API_KEY"
     parser.add_argument("--model_src", type=str, default="LiteLLM", choices=["HfApi", "LiteLLM", "Transformers"])
-    parser.add_argument("--model", type=str, default="groq/qwen-2.5-coder-32b")
-    parser.add_argument("--LiteLLMModel_API_key_name", type=str, default="GROQ_API_KEY")
-    parser.add_argument(
-        "--emb_func",
-        type=str,
-        default="sentence-transformers/all-MiniLM-L6-v2",
-        choices=["sentence-transformers/all-MiniLM-L6-v2"],
-    )  # feel free to add support for more embedding functions
-    parser.add_argument("--persist_dir", type=str, default="./chroma_db", help="Path to the persisted vector DB")
-
+    parser.add_argument("--model", type=str, default="gemini/gemini-2.0-flash")
+    parser.add_argument("--LiteLLMModel_API_key_name", type=str, default="GEMINI_API_KEY")
+ 
     args = parser.parse_args()
     return args
 
