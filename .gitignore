@@ -17,6 +17,7 @@ wheels/
 
 # other files
 rag_chromadb.py
+multi_vector_retriever.py
 multi_agent_web_search.py
 
 # folders
