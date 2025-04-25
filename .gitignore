@@ -23,3 +23,7 @@ multi_agent_web_search.py
 # folders
 chroma_db/
 .gradio/
+
+# Google Cloud files
+gcp-oauth.keys.json
+.*-server-credentials.json
