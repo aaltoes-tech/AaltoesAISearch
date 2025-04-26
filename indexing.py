@@ -1,7 +1,7 @@
 import argparse
 import os
 import os.path as osp
-from typing import Literal, Optional, Tuple, Union, List, Dict, Any
+from typing import Literal, Optional, Union, List, Dict, Any
 from typing_extensions import Annotated, TypedDict
 
 from dotenv import load_dotenv
@@ -22,11 +22,11 @@ VALID_MIMETYPES = [
 ]
 
 VALID_YEARS = [
-    "2020",
-    "2021",
-    "2022",
-    "2023",
     "2024",
+    "2023",
+    "2022",
+    "2021",
+    "2020",
 ]  # Add more years as needed
 
 
@@ -173,8 +173,7 @@ def generate_questions_keywords_from(args, file_str):
     # from pydantic import BaseModel, Field
     class FinnishToEnglishTranslation(TypedDict):
         """Finnish-to-English translation of documents."""
-
-        translation: Annotated[str, ..., """If the document is in Finnish, return its English translation. Otherwise, return 'None'"""]
+        translation: Annotated[str, ..., """If the document is in Finnish, return its English translation. Otherwise, return 'None'. In any case, Do NOT return the original document."""]
 
     # from langchain_core.output_parsers import StrOutputParser
     # from langchain.chains.query_constructor.base import StructuredQueryOutputParser
@@ -182,8 +181,12 @@ def generate_questions_keywords_from(args, file_str):
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    translate_template = """You are an expert at translating documents into English. \
-        If the majority of the document is already in English, then just return 'None'.\
+    translate_template = """You are an expert at translating Finnish documents into English. \
+        If the document is in Finnish with a few English words and names, return its full English translation. \
+        If the document is a mix of Finnish and English, return the full English translation. \
+        If the document is already in English with a few Finnish words and names, then just return 'None'.\
+        Remember to keep the original names of humans and places in the document. \
+        Make sure that the translation (if any) has the same structure as the original document. \
         Here is the document:\n\n{doc}"""
     translate_prompt = ChatPromptTemplate.from_template(translate_template)
     translate_llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
@@ -196,23 +199,30 @@ def generate_questions_keywords_from(args, file_str):
     )
 
     class QuestionKeywordsPair(TypedDict):
-        """Question and keywords pairs."""
-        question_keywords_pair: Annotated[List[str], ..., """A pair of a question and its related keywords."""]
-
-    class QuestionKeywordsList(TypedDict):
-        """List of question and keywords pairs."""
-        questions_keywords_pair_list: Annotated[List[QuestionKeywordsPair], ..., """A list of pairs of a question and its related keywords."""]
+        """A pair of a question and its related keywords."""
+        question: Annotated[str, ..., """A question"""]
+        keywords: Annotated[List[str], ..., """Related keywords."""]
 
     class FinalAnswer(TypedDict):
         """List of question and keywords pairs at general and specific levels."""
-        general_question_keyword_pairs: Annotated[QuestionKeywordsList, ..., """General questions from the whole document and their related keywords."""]
-        specific_question_keyword_pairs: Annotated[QuestionKeywordsList, ..., """Specific questions from the details of the document and their related keywords."""]
+        general_question_keyword_pairs: Annotated[List[QuestionKeywordsPair], ..., """General questions from the whole document and their related keywords."""]
+        specific_question_keyword_pairs: Annotated[List[QuestionKeywordsPair], ..., """Specific questions from the details of the document and their related keywords."""]
     
-    question_keyword_template = """You are an expert at generating potential questions that one might ask from documents. \
-    You generate both general questions (from the whole document) and specific questions (from the details of the document). \
-    For each question, you also generate a list of keywords that are relevant to the question. \
-    The keywords are to be used to search a database of documents. \
-    If there are acronyms, words, or names of human and places that you are not familiar with, do not try to rephrase them.
+    question_keyword_template = """You are an expert at generating potential questions and keywords that one might ask from documents.\n
+    Information about the documents:\n
+    - The documents are from a database belonging to Aaltoes (Aalto Entrepreneurship Society) which is a student-led organization in Aalto University, Finland.\n
+    - The documents are about the Aaltoes organization, its past activities and its past members.\n
+
+    Information about the questions and keywords:\n
+    - You generate both general questions (from the whole document) and specific questions (from the details of the document).\n
+    - For each question, you also generate a list of important keywords that are relevant to the question.\n
+    - These questions and keywords are to be stored in a database that is linked to the document datastore.\n
+    - When the user ask a question, the system will search for the most relevant question and keywords, and then returns the linked documents.\n
+    - Therefore, the questions must be INDEPENDENT of each other, and must not refer to each other.\n
+    - Questions also must not refer to a prior knowledge of the document (e.g. 'what was "the" trip about?', instead of "the" mention the trip name).\n
+    - Questions must be important enough and likely to be asked by both Aaltoes members and visitors.\n
+    - Since the documents are about past activities and past members, questions must be formulated in the past tense.\n
+    - If there are acronyms, words, or names of human and places that you are not familiar with, do not try to rephrase them.\n
     
     Given the following document, return a list of question and keyword pairs as instructed:\n\n
     Document in original language:\n\n{doc}\n\n
@@ -244,6 +254,7 @@ def parse_args():
         default="gemini-embedding-exp-03-07",
         choices=["gemini-embedding-exp-03-07"],
     )  # feel free to add support for more embedding functions
+    parser.add_argument("--years", default="full")
 
     args = parser.parse_args()
     return args
@@ -262,12 +273,13 @@ def index():
 
     from langchain_core.documents import Document
     db_persist_dir = os.environ.get(key="CHROMADB_PERSISTED_PATH", default="./chroma_db")
-    vector_store = Chroma(collection_name="summaries",
+    vector_store = Chroma(collection_name="Questions_and_Keywords",
                           embedding_function=embedding_function,
                           persist_directory=db_persist_dir)
 
+    years = VALID_YEARS if args.years=="full" else args.years
     print("preparing docs ...")
-    for year in VALID_YEARS:
+    for year in years:
         for mime_type in VALID_MIMETYPES:
             print(f"    Searching for {mime_type} files from {year} ...")
             files_list = get_gdrive_files(service, year, mime_type)
@@ -284,22 +296,31 @@ def index():
                     generate questions
                     delete the file
                 '''
+                if file.get("name") == "test me":
+                    continue
                 file_str = get_parsed_elements(service, file, mime_type)
                 
                 question_key_pairs = generate_questions_keywords_from(args, file_str)
-                continue
                 
                 # Docs linked to summaries
-                questions_docs = [
-                    Document(page_content=q, metadata={"file_name": file.get("name"),
-                                                       "file_id": file.get("id"),
-                                                       "year": year,
-                                                       "mime_type": mime_type,
-                                                       "keywords": keyword,
-                                                       })
-                    for q, keyword in question_key_pairs
-                ]
-                vector_store.add_documents(questions_docs)
+                for question_level in ["general_question_keyword_pairs", "specific_question_keyword_pairs"]:
+                    # for each question level, we will add the questions to the vector store
+                    # and also add the metadata to the vector store
+                    # but for generation, we will also give the metadata to the LLM 
+                    questions_docs = [
+                        Document(page_content=question_key_pair['question'],
+                                 metadata={"file_name": file.get("name"),
+                                            "file_id": file.get("id"),
+                                            "year": year,
+                                            "mime_type": mime_type,
+                                            "keywords": question_key_pair['keywords'],
+                                            })
+                        for question_key_pair in question_key_pairs[question_level]
+                    ]
+                    # for generation, we will also give the metadata to the LLM 
+                    continue
+                continue
+                    # vector_store.add_documents(questions_docs)
     
     return vector_store
 
