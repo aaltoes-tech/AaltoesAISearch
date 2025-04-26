@@ -1,8 +1,11 @@
 import argparse
 import os
 import os.path as osp
+from typing import Literal, Optional, Tuple, Union, List, Dict, Any
+from typing_extensions import Annotated, TypedDict
 
 from dotenv import load_dotenv
+
 from langchain_chroma import Chroma
 
 from googleapiclient.discovery import build
@@ -160,28 +163,75 @@ def get_parsed_elements(service, file, mime_type):
     # filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "layout-parser-paper-fast.pdf")
     # with open(filename, "rb") as f:
     elements = partition(file=file_bytes, content_type=mime_type)
-    print("\n\n".join([str(el) for el in elements][5:15]))
+    file_str = "\n\n".join([str(el) for el in elements]) # [:20])
 
-    return elements
+    return file_str
 
 
-def generate_questions_keywords_from(args, elemnts):
-    from langchain_core.output_parsers import StrOutputParser
+def generate_questions_keywords_from(args, file_str):
+    from operator import itemgetter
+    # from pydantic import BaseModel, Field
+    class FinnishToEnglishTranslation(TypedDict):
+        """Finnish-to-English translation of documents."""
+
+        translation: Annotated[str, ..., """If the document is in Finnish, return its English translation. Otherwise, return 'None'"""]
+
+    # from langchain_core.output_parsers import StrOutputParser
+    # from langchain.chains.query_constructor.base import StructuredQueryOutputParser
+
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_google_genai import ChatGoogleGenerativeAI
 
+    translate_template = """You are an expert at translating documents into English. \
+        If the majority of the document is already in English, then just return 'None'.\
+        Here is the document:\n\n{doc}"""
+    translate_prompt = ChatPromptTemplate.from_template(translate_template)
+    translate_llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
+    # output_parser = StructuredQueryOutputParser.from_components()
 
-    llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
-
-    chain = (
-        {"doc": lambda x: x.page_content}
-        | ChatPromptTemplate.from_template("Generate question-keyword pairs for the following document:\n\n{doc}")
-        | llm
-        | StrOutputParser()
+    translate_chain = (
+        translate_prompt
+        | translate_llm.with_structured_output(schema=FinnishToEnglishTranslation)
+        # | output_parser
     )
 
-    summaries = chain.batch(elemnts, {"max_concurrency": 5})
-    return summaries
+    class QuestionKeywordsPair(TypedDict):
+        """Question and keywords pairs."""
+        question_keywords_pair: Annotated[List[str], ..., """A pair of a question and its related keywords."""]
+
+    class QuestionKeywordsList(TypedDict):
+        """List of question and keywords pairs."""
+        questions_keywords_pair_list: Annotated[List[QuestionKeywordsPair], ..., """A list of pairs of a question and its related keywords."""]
+
+    class FinalAnswer(TypedDict):
+        """List of question and keywords pairs at general and specific levels."""
+        general_question_keyword_pairs: Annotated[QuestionKeywordsList, ..., """General questions from the whole document and their related keywords."""]
+        specific_question_keyword_pairs: Annotated[QuestionKeywordsList, ..., """Specific questions from the details of the document and their related keywords."""]
+    
+    question_keyword_template = """You are an expert at generating potential questions that one might ask from documents. \
+    You generate both general questions (from the whole document) and specific questions (from the details of the document). \
+    For each question, you also generate a list of keywords that are relevant to the question. \
+    The keywords are to be used to search a database of documents. \
+    If there are acronyms, words, or names of human and places that you are not familiar with, do not try to rephrase them.
+    
+    Given the following document, return a list of question and keyword pairs as instructed:\n\n
+    Document in original language:\n\n{doc}\n\n
+    ------------------------\n\n
+    Document translation to English (if the original is not in English):\n\n{translation}"""
+    question_keyword_prompt = ChatPromptTemplate.from_template(question_keyword_template)
+
+    question_keyword_llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
+
+    overall_chain = (
+        {"doc": itemgetter("doc"),
+         "translation": itemgetter("doc") | translate_chain | itemgetter("translation")}
+        | question_keyword_prompt
+        | question_keyword_llm.with_structured_output(schema=FinalAnswer)
+        # | StrOutputParser()
+    )
+
+    question_keys = overall_chain.invoke({"doc": file_str})
+    return question_keys
 
 
 def parse_args():
@@ -216,7 +266,7 @@ def index():
                           embedding_function=embedding_function,
                           persist_directory=db_persist_dir)
 
-    print("preparing docs ...\n")
+    print("preparing docs ...")
     for year in VALID_YEARS:
         for mime_type in VALID_MIMETYPES:
             print(f"    Searching for {mime_type} files from {year} ...")
@@ -234,9 +284,10 @@ def index():
                     generate questions
                     delete the file
                 '''
-                elements = get_parsed_elements(service, file, mime_type)
+                file_str = get_parsed_elements(service, file, mime_type)
+                
+                question_key_pairs = generate_questions_keywords_from(args, file_str)
                 continue
-                question_key_pairs = generate_questions_keywords_from(args, elements)
                 
                 # Docs linked to summaries
                 questions_docs = [
