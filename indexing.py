@@ -1,4 +1,5 @@
 import argparse
+from time import sleep
 import os
 import os.path as osp
 from typing import Literal, Optional, Union, List, Dict, Any
@@ -20,6 +21,13 @@ VALID_MIMETYPES = [
     # "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/pdf"
 ]
+
+FILE_TYPE_MAP = {
+    "MSWords": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "MSPP": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "MSExcel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "PDF": "application/pdf"
+}
 
 VALID_YEARS = [
     "2024",
@@ -115,17 +123,17 @@ def get_gdrive_files(service, year, mime_type) -> list:
         raise e
 
 
-def get_file_bytes(service, file, mime_type):
+def get_file_bytes(service, file):
     import io
     from googleapiclient.http import MediaIoBaseDownload
     try:
         # For Google Docs/Sheets/etc we need to export
-        if mime_type.startswith("application/vnd.google-apps"):
+        if file.get("mimeType").startswith("application/vnd.google-apps"):
             export_mime_type = {
                 "application/vnd.google-apps.document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "application/vnd.google-apps.spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "application/vnd.google-apps.presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            }.get(mime_type, "text/plain")
+            }.get(file.get("mimeType"), "text/plain")
 
             request = service.files().export_media(
                 fileId=file.get("id"), mimeType=export_mime_type
@@ -154,15 +162,15 @@ def get_file_bytes(service, file, mime_type):
         raise e
 
 
-def get_parsed_elements(service, file, mime_type):
+def get_parsed_elements(service, file):
     '''get the file content in bytes
     read and partition the file content'''
-    file_bytes = get_file_bytes(service, file, mime_type)
+    file_bytes = get_file_bytes(service, file)
 
     from unstructured.partition.auto import partition
     # filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "layout-parser-paper-fast.pdf")
     # with open(filename, "rb") as f:
-    elements = partition(file=file_bytes, content_type=mime_type)
+    elements = partition(file=file_bytes, content_type=file.get("mimeType"))
     file_str = "\n\n".join([str(el) for el in elements]) # [:20])
 
     return file_str
@@ -271,26 +279,7 @@ def generate_questions_keywords_from(args, file_str, file, year):
     return question_keys
 
 
-def parse_args():
-    help_msg = """Agentic RAG with ChromaDB"""
-    parser = argparse.ArgumentParser(description=help_msg, formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--model", type=str, default="gemini-2.0-flash")
-    parser.add_argument(
-        "--emb_func",
-        type=str,
-        default="gemini-embedding-exp-03-07",
-        choices=["gemini-embedding-exp-03-07"],
-    )  # feel free to add support for more embedding functions
-    parser.add_argument("--years", default="full")
-
-    args = parser.parse_args()
-    return args
-
-
-def index():
-    load_dotenv()
-    args = parse_args()
-    
+def index(args):    
     creds = gdrive_auth()
     # create drive api client
     service = build("drive", "v3", credentials=creds)
@@ -304,7 +293,7 @@ def index():
                           embedding_function=embedding_function,
                           persist_directory=db_persist_dir)
 
-    years = VALID_YEARS if args.years=="full" else args.years
+    years = VALID_YEARS if args.indx_years=="Full" else args.indx_years
     print("preparing docs ...")
     for year in years:
         for mime_type in VALID_MIMETYPES:
@@ -318,7 +307,7 @@ def index():
             for file in files_list:
                 if file.get("name") == "test me":
                     continue
-                file_str = get_parsed_elements(service, file, mime_type)
+                file_str = get_parsed_elements(service, file)
                 
                 question_key_pairs = generate_questions_keywords_from(args, file_str, file, year)
                 
@@ -329,26 +318,131 @@ def index():
                     # but for generation, we will also give the metadata to the LLM 
                     questions_docs = [
                         Document(page_content=question_key_pair['question'],
-                                 metadata={"file_name": file.get("name"),
-                                            "file_id": file.get("id"),
+                                 metadata={"name": file.get("name"),
+                                            "id": file.get("id"),
                                             "year": year,
-                                            "mime_type": mime_type,
-                                            "keywords": question_key_pair['keywords'],
+                                            "mimeType": mime_type,
+                                            # "keywords": question_key_pair['keywords'],
                                             })
                         for question_key_pair in question_key_pairs[question_level]
                     ]
-                    # for generation, we will also give the metadata to the LLM 
-                    continue
-                continue
-                    # vector_store.add_documents(questions_docs)
+                    # ! ValueError: Expected metadata value for metadata in Chroma to be a str, int, float or bool, got keywords:List[str] which is a list in upsert.
+                    # ! Try filtering complex metadata from the document using langchain_community.vectorstores.utils.filter_complex_metadata.
+                    # TODO: for generation, we will also give the metadata to the LLM
+                    # continue
+                # continue
+                    vector_store.add_documents(questions_docs)
+            sleep(10)
     
-    return vector_store
+    # return vector_store
+
+
+def get_unique_docs(documents: list) -> list:
+    """ Unique union of retrieved docs """
+    # Get the files_list of all retrieved documents
+    files_list = [doc.metadata for doc in documents]
+    
+    # Get unique documents, using dictionary comprehension
+    unique_files_list = list({file['id']: file for file in files_list}.values())
+    # Return
+    return unique_files_list
+
+
+def generate_retriever_reponse(args, query, joined_files_str):
+    from langchain_core.output_parsers import StrOutputParser
+    # from langchain.chains.query_constructor.base import StructuredQueryOutputParser
+
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    retriever_template = """You are a helpful assistant that answers questions based on the documents provided.
+    Information about the documents:
+    - The documents are retrieved from a database belonging to Aaltoes (Aalto Entrepreneurship Society) which is a student-led organization in Aalto University, Finland.
+    - The documents are about the Aaltoes organization, its past activities and its past members.
+    - If you are unable to answer the question based on the retrieved documents, then you can ask the user to either:
+        - rephrase the question,
+        - increase the "top k" value.
+        - or narrow down the search by filtering the documents by year. 
+    
+    - Here is the query:\n\n{query}\n
+    - Here are the retrieved documents from the database:\n\n{docs}\n
+    - Here is the query again:\n\n{query}"""
+    
+    retriever_prompt = ChatPromptTemplate.from_template(retriever_template)
+    retriever_llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
+    
+
+    retriever_chain = (
+        retriever_prompt
+        | retriever_llm
+        | StrOutputParser()
+    )
+
+    retriever_reponse = retriever_chain.invoke({"query": query, "docs": joined_files_str})
+    return retriever_reponse
+
+
+def retrieve(args):    
+    creds = gdrive_auth()
+    # create drive api client
+    service = build("drive", "v3", credentials=creds)
+
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+    embedding_function = GoogleGenerativeAIEmbeddings(model=args.emb_func, google_api_key=os.environ.get("GEMINI_API_KEY"))
+
+    from langchain_core.documents import Document
+    db_persist_dir = os.environ.get(key="CHROMADB_PERSISTED_PATH", default="./chroma_db")
+    vector_store = Chroma(collection_name="Questions_and_Keywords",
+                          embedding_function=embedding_function,
+                          persist_directory=db_persist_dir)
+    
+    if args.retr_year == "Full":
+        docs = vector_store.similarity_search(query=args.query, k=args.top_k)
+    else:
+        docs = vector_store.similarity_search(query=args.query, k=args.top_k, 
+                                              filter={"year": args.retr_year})
+
+    files_list = get_unique_docs(docs)
+    
+    files_str = [f"""Document "{file.get("name")}" from year {file.get("year")}:\n"""+get_parsed_elements(service, file) for file in files_list]
+
+    joined_files_str = "\n\n----------\n\n".join(files_str)
+
+    retriever_reponse = generate_retriever_reponse(args, args.query, joined_files_str)
+    print(retriever_reponse)
+
+
+def parse_args():
+    help_msg = """Aaltoes RAG with ChromaDB"""
+    parser = argparse.ArgumentParser(description=help_msg, formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument("--mode", type=str, default="retrieve", choices=["index", "retrieve"], help="index or retrieve")
+    parser.add_argument("--model", type=str, default="gemini-2.0-flash")
+    parser.add_argument(
+        "--emb_func",
+        type=str,
+        default="models/text-embedding-004",
+        choices=["models/text-embedding-004"],
+    )  # feel free to add support for more embedding functions
+    parser.add_argument("--indx_years", default=[2024,2022])#"Full")
+
+    parser.add_argument("--query", type=str, default="What was the purpose of Aaltoes?")
+    parser.add_argument("--top_k", type=int, default=5)
+    parser.add_argument("--retr_year", default="Full", choices=[2024, 2023, 2022, 2021, 2020, "Full"])
+    parser.add_argument("--file_type", default="Full", choices=["Full", "MSWords", "MSPP", "MSExcel", "PDF"])
+    args = parser.parse_args()
+    return args
+
+
+def main():
+    load_dotenv()
+    args = parse_args()
+    if args.mode == "retrieve":
+        retrieve(args)
+    elif args.mode == "index":
+        index(args)
+    else:
+        raise ValueError(f"Invalid mode: {args.mode}")
+
 
 if __name__ == "__main__":
-    vector_store = index()
-
-    query = "Memory in agents"
-    sub_docs = vector_store.similarity_search(query,k=1)
-    ''' sub_docs[0]:
-    Document(page_content='The document discusses the concept of building autonomous agents powered by Large Language Models (LLMs) as their core controllers. It covers components such as planning, memory, and tool use, along with case studies and proof-of-concept examples like AutoGPT and GPT-Engineer. Challenges like finite context length, planning difficulties, and reliability of natural language interfaces are also highlighted. The document provides references to related research papers and offers a comprehensive overview of LLM-powered autonomous agents.', metadata={'doc_id': 'cf31524b-fe6a-4b28-a980-f5687c9460ea'}) '''
-
+    main()
