@@ -30,13 +30,11 @@ def main():
     # Choose which LLM engine to use!
     if args.model_src == "HfApi":
         from smolagents import HfApiModel
-
         # You can choose to not pass any model_id to HfApiModel to use a default free model
         model = HfApiModel(model_id=args.model, token=os.environ.get("HF_API_KEY"))
 
     elif args.model_src == "Transformers":
         from smolagents import TransformersModel
-
         model = TransformersModel(model_id=args.model)
 
     elif args.model_src == "LiteLLM":

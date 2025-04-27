@@ -168,7 +168,7 @@ def get_parsed_elements(service, file, mime_type):
     return file_str
 
 
-def generate_questions_keywords_from(args, file_str):
+def generate_questions_keywords_from(args, file_str, file, year):
     from operator import itemgetter
     # from pydantic import BaseModel, Field
     class FinnishToEnglishTranslation(TypedDict):
@@ -181,13 +181,13 @@ def generate_questions_keywords_from(args, file_str):
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    translate_template = """You are an expert at translating Finnish documents into English. \
-        If the document is in Finnish with a few English words and names, return its full English translation. \
-        If the document is a mix of Finnish and English, return the full English translation. \
-        If the document is already in English with a few Finnish words and names, then just return 'None'.\
-        Remember to keep the original names of humans and places in the document. \
-        Make sure that the translation (if any) has the same structure as the original document. \
-        Here is the document:\n\n{doc}"""
+    translate_template = """You are an expert at translating Finnish documents into English.
+        - If the document is in Finnish with a few English words and names, return its full English translation.
+        - If the document is a mix of Finnish and English, return the full English translation.
+        - If the document is already in English with a few Finnish words and names, then just return 'None'
+        - Remember to keep the original names of humans and places in the document.
+        - Make sure that the translation (if any) has the same structure as the original document.
+        - Here is the document:\n\n{doc}"""
     translate_prompt = ChatPromptTemplate.from_template(translate_template)
     translate_llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
     # output_parser = StructuredQueryOutputParser.from_components()
@@ -208,39 +208,57 @@ def generate_questions_keywords_from(args, file_str):
         general_question_keyword_pairs: Annotated[List[QuestionKeywordsPair], ..., """General questions from the whole document and their related keywords."""]
         specific_question_keyword_pairs: Annotated[List[QuestionKeywordsPair], ..., """Specific questions from the details of the document and their related keywords."""]
     
-    question_keyword_template = """You are an expert at generating potential questions and keywords that one might ask from documents.\n
-    Information about the documents:\n
-    - The documents are from a database belonging to Aaltoes (Aalto Entrepreneurship Society) which is a student-led organization in Aalto University, Finland.\n
-    - The documents are about the Aaltoes organization, its past activities and its past members.\n
+    question_keyword_template = """You are an expert at generating potential questions and keywords that one might ask from documents.
+    Information about the documents:
+    - The documents are from a database belonging to Aaltoes (Aalto Entrepreneurship Society) which is a student-led organization in Aalto University, Finland.
+    - The documents are about the Aaltoes organization, its past activities and its past members.
 
-    Information about the questions and keywords:\n
-    - You generate both general questions (from the whole document) and specific questions (from the details of the document).\n
-    - For each question, you also generate a list of important keywords that are relevant to the question.\n
-    - These questions and keywords are to be stored in a database that is linked to the document datastore.\n
-    - When the user ask a question, the system will search for the most relevant question and keywords, and then returns the linked documents.\n
-    - Therefore, the questions must be INDEPENDENT of each other, and must not refer to each other.\n
-    - Questions also must not refer to a prior knowledge of the document (e.g. 'what was "the" trip about?', instead of "the" mention the trip name).\n
-    - Questions must be important enough and likely to be asked by both Aaltoes members and visitors.\n
-    - Since the documents are about past activities and past members, questions must be formulated in the past tense.\n
-    - If there are acronyms, words, or names of human and places that you are not familiar with, do not try to rephrase them.\n
+    Information about the questions and keywords:
+    - You generate both general questions (from the whole document) and specific questions (from the details of the document).
+    - For each question, you also generate a list of important keywords that are relevant to the question.
+    - These questions and keywords are to be stored in a database that is linked to the document datastore.
+    - When the user ask a question, the system will search for the most relevant question and keywords, and then returns the linked documents.
+    - Therefore, the questions must be INDEPENDENT of each other, and must not refer to each other.
+    - Questions also must not refer to a prior knowledge of the document (e.g. 'what was "the" trip about?', instead of "the" mention the trip name).
+    - Questions must be about the Aaltoes organization, its past activities and its past members and formulated in the past tense. Extract all questions that are about these topics and important enough and likely to be asked by an Aaltoes member or a visitor.
+    - If there are acronyms, words, or names of human and places that you are not familiar with, do not try to rephrase them.
+
+    Here are some examples of the questions:
+    - What kind of partnership deals were signed with Aaltoes in 2021?
+    - What trips did Aaltoes have in 2024?
+    - What was the salary of Aaltoes board members in 2019?
+    - How much did Aaltoes spend on orientation week 2022?
+    - How much did Aaltoes receive from Aalto university in 2021?
+    - How many board members did Aaltoes have overall?
+    - How many members does Aaltoes have?
+    - How many partners does Aaltoes have?
+    - When was the the X event?
+    - When was the deadline for payment of the purchases of the X event?
+    - Where was location of the X event?
+    - Where was the location of the Aaltoes office in 2020?
+    - Who was the president of Aaltoes in 2022?
+    - Who from Aaltoes was/were responsible for the London trip?
+    - Was Aaltoes featured in any media coverage?
     
-    Given the following document, return a list of question and keyword pairs as instructed:\n\n
-    Document in original language:\n\n{doc}\n\n
+    Given the following document, named "{name}" from year {year}, return as many question and keyword pairs as you can, based on the instructions:\n
+    The document in original language:\n\n{doc}\n\n
     ------------------------\n\n
-    Document translation to English (if the original is not in English):\n\n{translation}"""
+    The document translation to English (if the original is not in English):\n\n{translation}"""
     question_keyword_prompt = ChatPromptTemplate.from_template(question_keyword_template)
 
     question_keyword_llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
 
     overall_chain = (
         {"doc": itemgetter("doc"),
+         "name": itemgetter("name"),
+         "year": itemgetter("year"),
          "translation": itemgetter("doc") | translate_chain | itemgetter("translation")}
         | question_keyword_prompt
         | question_keyword_llm.with_structured_output(schema=FinalAnswer)
         # | StrOutputParser()
     )
 
-    question_keys = overall_chain.invoke({"doc": file_str})
+    question_keys = overall_chain.invoke({"doc": file_str, "name": file.get("name"), "year": year})
     return question_keys
 
 
@@ -287,20 +305,13 @@ def index():
                 print(f"        No {mime_type} files found for {year}")
                 continue
             print(f"        Found {len(files_list)} {mime_type} files for {year}")
+            
             for file in files_list:
-                '''
-                get the list file ids
-                one by one:
-                    get the file content in base64
-                    read and partition the file content
-                    generate questions
-                    delete the file
-                '''
                 if file.get("name") == "test me":
                     continue
                 file_str = get_parsed_elements(service, file, mime_type)
                 
-                question_key_pairs = generate_questions_keywords_from(args, file_str)
+                question_key_pairs = generate_questions_keywords_from(args, file_str, file, year)
                 
                 # Docs linked to summaries
                 for question_level in ["general_question_keyword_pairs", "specific_question_keyword_pairs"]:
