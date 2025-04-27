@@ -217,28 +217,37 @@ def generate_questions_keywords_from(args, file_str, file, year):
     - You generate both general questions (from the whole document) and specific questions (from the details of the document).
     - For each question, you also generate a list of important keywords that are relevant to the question.
     - These questions and keywords are to be stored in a database that is linked to the document datastore.
-    - When the user ask a question, the system will search for the most relevant question and keywords, and then returns the linked documents.
+    - When an Aaltoes member or a visitor ask a question, the system will search for the most relevant question and keywords, and then returns the linked documents.
     - Therefore, the questions must be INDEPENDENT of each other, and must not refer to each other.
     - Questions also must not refer to a prior knowledge of the document (e.g. 'what was "the" trip about?', instead of "the" mention the trip name).
-    - Questions must be about the Aaltoes organization, its past activities and its past members and formulated in the past tense. Extract all questions that are about these topics and important enough and likely to be asked by an Aaltoes member or a visitor.
+    - Questions must be about the Aaltoes organization, its past activities and its past members and formulated in the past tense.
+    - Extract all the questions that are about these topics at both general and specific level.
     - If there are acronyms, words, or names of human and places that you are not familiar with, do not try to rephrase them.
 
     Here are some examples of the questions:
-    - What kind of partnership deals were signed with Aaltoes in 2021?
-    - What trips did Aaltoes have in 2024?
-    - What was the salary of Aaltoes board members in 2019?
-    - How much did Aaltoes spend on orientation week 2022?
-    - How much did Aaltoes receive from Aalto university in 2021?
-    - How many board members did Aaltoes have overall?
-    - How many members does Aaltoes have?
-    - How many partners does Aaltoes have?
-    - When was the the X event?
-    - When was the deadline for payment of the purchases of the X event?
-    - Where was location of the X event?
-    - Where was the location of the Aaltoes office in 2020?
-    - Who was the president of Aaltoes in 2022?
-    - Who from Aaltoes was/were responsible for the London trip?
-    - Was Aaltoes featured in any media coverage?
+    - General questions:
+        - What was the purpose of Aaltoes?
+        - What trips did Aaltoes have in 2024?
+        - What kind of partnership deals were signed with Aaltoes in 2021?
+        - What happened in the X event?
+        - Where was location of the X event?
+        - Who was the president of Aaltoes in 2022?
+        - How many members did Aaltoes have overall in 2022?
+        - How many partners did Aaltoes have overall in 2021?
+        - How much money did Aaltoes receive in general in 2021?
+        - How much did Aaltoes spend in general in 2022?
+        - What media coverage was Aaltoes featured in overall?
+
+    - Specific questions:
+        - What was the responsibilities of Maija in the X event?
+        - What was the terms of the partnership deal with X company?
+        - How much was the salary of the president of Aaltoes in 2019?
+        - How much money did Aaltoes receive from just Aalto university in 2021?
+        - How much did Aaltoes spend on just orientation week 2022?
+        - When was the deadline for payment of the purchases of the X event?
+        - Who from Aaltoes was/were responsible for the London trip?
+        - Who was the main speaker of the X event?
+    
     
     Given the following document, named "{name}" from year {year}, return as many question and keyword pairs as you can, based on the instructions:\n
     The document in original language:\n\n{doc}\n\n
