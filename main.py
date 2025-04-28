@@ -12,6 +12,7 @@ from langchain_chroma import Chroma
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+
 VALID_MIMETYPES = [
     "application/vnd.google-apps.document",
     "application/vnd.google-apps.presentation",
@@ -21,14 +22,12 @@ VALID_MIMETYPES = [
     # "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/pdf"
 ]
-
 FILE_TYPE_MAP = {
     "MSWords": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "MSPP": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "MSExcel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "PDF": "application/pdf"
 }
-
 VALID_YEARS = [
     "2024",
     "2023",
@@ -36,6 +35,8 @@ VALID_YEARS = [
     "2021",
     "2020",
 ]  # Add more years as needed
+VALID_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0"]
+VALID_OPENAI_MODELS = ["gpt-4o", "gpt-3.5-turbo"]
 
 
 def gdrive_auth():
@@ -64,6 +65,33 @@ def gdrive_auth():
             with open(".gdrive-server-credentials.json", "w") as token:
                 token.write(creds.to_json())
     return creds
+
+
+def get_embedding_function(args):
+    if args.emb_func == "google":
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+        embedding_function = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004",
+                                                          google_api_key=os.environ.get("GEMINI_API_KEY"))
+    elif args.emb_func == "openai":
+        from langchain_openai import OpenAIEmbeddings
+        embedding_function = OpenAIEmbeddings(model="text-embedding-ada-002",
+                                              openai_api_key=os.environ.get("OPENAI_API_KEY"))
+    else:
+        raise ValueError(f"Invalid embedding function: {args.emb_func}",
+                         f"Valid options are: google, openai")
+    return embedding_function
+
+
+def get_llm(args):
+    if args.model in VALID_GEMINI_MODELS:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
+    elif args.model in VALID_OPENAI_MODELS:
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(model=args.model, openai_api_key=os.environ.get("OPENAI_API_KEY"))
+    else:
+        raise ValueError(f"Invalid model: {args.model}",
+                         f"Valid options are: {VALID_GEMINI_MODELS}, {VALID_OPENAI_MODELS}")
 
 
 def get_gdrive_files(service, year, mime_type) -> list:
@@ -187,7 +215,6 @@ def generate_questions_keywords_from(args, file_str, file, year):
     # from langchain.chains.query_constructor.base import StructuredQueryOutputParser
 
     from langchain_core.prompts import ChatPromptTemplate
-    from langchain_google_genai import ChatGoogleGenerativeAI
 
     translate_template = """You are an expert at translating Finnish documents into English.
         - If the document is in Finnish with a few English words and names, return its full English translation.
@@ -197,7 +224,7 @@ def generate_questions_keywords_from(args, file_str, file, year):
         - Make sure that the translation (if any) has the same structure as the original document.
         - Here is the document:\n\n{doc}"""
     translate_prompt = ChatPromptTemplate.from_template(translate_template)
-    translate_llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
+    translate_llm = get_llm(args)
     # output_parser = StructuredQueryOutputParser.from_components()
 
     translate_chain = (
@@ -263,7 +290,7 @@ def generate_questions_keywords_from(args, file_str, file, year):
     The document translation to English (if the original is not in English):\n\n{translation}"""
     question_keyword_prompt = ChatPromptTemplate.from_template(question_keyword_template)
 
-    question_keyword_llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
+    question_keyword_llm = get_llm(args)
 
     overall_chain = (
         {"doc": itemgetter("doc"),
@@ -279,13 +306,12 @@ def generate_questions_keywords_from(args, file_str, file, year):
     return question_keys
 
 
-def index(args):    
+def index(args):
     creds = gdrive_auth()
     # create drive api client
     service = build("drive", "v3", credentials=creds)
 
-    from langchain_google_genai import GoogleGenerativeAIEmbeddings
-    embedding_function = GoogleGenerativeAIEmbeddings(model=args.emb_func, google_api_key=os.environ.get("GEMINI_API_KEY"))
+    embedding_function = get_embedding_function(args)
 
     from langchain_core.documents import Document
     db_persist_dir = os.environ.get(key="CHROMADB_PERSISTED_PATH", default="./chroma_db")
@@ -312,7 +338,7 @@ def index(args):
                 question_key_pairs = generate_questions_keywords_from(args, file_str, file, year)
                 
                 # Docs linked to summaries
-                for question_level in ["general_question_keyword_pairs", "specific_question_keyword_pairs"]:
+                for question_level in ["general", "specific"]:
                     # for each question level, we will add the questions to the vector store
                     # and also add the metadata to the vector store
                     # but for generation, we will also give the metadata to the LLM 
@@ -322,9 +348,11 @@ def index(args):
                                             "id": file.get("id"),
                                             "year": year,
                                             "mimeType": mime_type,
+                                            "level": question_level,
                                             # "keywords": question_key_pair['keywords'],
+                                            # "potential_users": question_key_pair['potential_users'],
                                             })
-                        for question_key_pair in question_key_pairs[question_level]
+                        for question_key_pair in question_key_pairs[f"{question_level}_question_keyword_pairs"]
                     ]
                     # ! ValueError: Expected metadata value for metadata in Chroma to be a str, int, float or bool, got keywords:List[str] which is a list in upsert.
                     # ! Try filtering complex metadata from the document using langchain_community.vectorstores.utils.filter_complex_metadata.
@@ -353,7 +381,6 @@ def generate_retriever_reponse(args, query, joined_files_str):
     # from langchain.chains.query_constructor.base import StructuredQueryOutputParser
 
     from langchain_core.prompts import ChatPromptTemplate
-    from langchain_google_genai import ChatGoogleGenerativeAI
 
     retriever_template = """You are a helpful assistant that answers questions based on the documents provided.
     Information about the documents:
@@ -369,8 +396,7 @@ def generate_retriever_reponse(args, query, joined_files_str):
     - Here is the query again:\n\n{query}"""
     
     retriever_prompt = ChatPromptTemplate.from_template(retriever_template)
-    retriever_llm = ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
-    
+    retriever_llm = get_llm(args)
 
     retriever_chain = (
         retriever_prompt
@@ -387,8 +413,7 @@ def retrieve(args):
     # create drive api client
     service = build("drive", "v3", credentials=creds)
 
-    from langchain_google_genai import GoogleGenerativeAIEmbeddings
-    embedding_function = GoogleGenerativeAIEmbeddings(model=args.emb_func, google_api_key=os.environ.get("GEMINI_API_KEY"))
+    embedding_function = get_embedding_function(args)
 
     from langchain_core.documents import Document
     db_persist_dir = os.environ.get(key="CHROMADB_PERSISTED_PATH", default="./chroma_db")
@@ -415,15 +440,10 @@ def retrieve(args):
 def parse_args():
     help_msg = """Aaltoes RAG with ChromaDB"""
     parser = argparse.ArgumentParser(description=help_msg, formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--mode", type=str, default="retrieve", choices=["index", "retrieve"], help="index or retrieve")
-    parser.add_argument("--model", type=str, default="gemini-2.0-flash")
-    parser.add_argument(
-        "--emb_func",
-        type=str,
-        default="models/text-embedding-004",
-        choices=["models/text-embedding-004"],
-    )  # feel free to add support for more embedding functions
-    parser.add_argument("--indx_years", default=[2024,2022])#"Full")
+    parser.add_argument("--mode", type=str, default="index", choices=["index", "retrieve"], help="index or retrieve")
+    parser.add_argument("--model", type=str, default="gpt-4o", choices=VALID_GEMINI_MODELS + VALID_OPENAI_MODELS)
+    parser.add_argument("--emb_func", type=str, default="openai", choices=["google", "openai"])  # feel free to add support for more embedding functions
+    parser.add_argument("--indx_years", default=[2020])#"Full")
 
     parser.add_argument("--query", type=str, default="What was the purpose of Aaltoes?")
     parser.add_argument("--top_k", type=int, default=5)
