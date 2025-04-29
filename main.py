@@ -391,6 +391,8 @@ def generate_retriever_reponse(args, query, joined_files_str):
         - increase the "top k" value.
         - or narrow down the search by filtering the documents by year. 
     
+    - Although there might be some documents that are in Finnish language, you must answer the question only in English.
+    
     - Here is the query:\n\n{query}\n
     - Here are the retrieved documents from the database:\n\n{docs}\n
     - Here is the query again:\n\n{query}"""
