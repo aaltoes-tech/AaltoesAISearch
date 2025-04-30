@@ -392,7 +392,8 @@ def generate_retriever_reponse(args, query, joined_files_str):
         - or narrow down the search by filtering the documents by year. 
     
     - Although there might be some documents that are in Finnish language, you must answer the question only in English.
-    
+    - Write your answer in Markdown format, and cite the documents you used to answer the question by their number (Document i).
+
     - Here is the query:\n\n{query}\n
     - Here are the retrieved documents from the database:\n\n{docs}\n
     - Here is the query again:\n\n{query}"""
@@ -431,12 +432,12 @@ def retrieve(args):
 
     files_list = get_unique_docs(docs)
     
-    files_str = [f"""Document "{file.get("name")}" from year {file.get("year")}:\n"""+get_parsed_elements(service, file) for file in files_list]
+    files_str = [f"""# Document {i} - "{file.get("name")}" from year {file.get("year")}:\n"""+get_parsed_elements(service, file) for i, file in enumerate(files_list)]
 
     joined_files_str = "\n\n----------\n\n".join(files_str)
 
     retriever_reponse = generate_retriever_reponse(args, args.query, joined_files_str)
-    print(retriever_reponse)
+    return retriever_reponse, files_list
 
 
 def parse_args():
@@ -459,7 +460,8 @@ def main():
     load_dotenv()
     args = parse_args()
     if args.mode == "retrieve":
-        retrieve(args)
+        retriever_reponse, _ = retrieve(args)
+        print(retriever_reponse)
     elif args.mode == "index":
         index(args)
     else:
