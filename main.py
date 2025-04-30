@@ -432,7 +432,7 @@ def retrieve(args):
 
     files_list = get_unique_docs(docs)
     
-    files_str = [f"""# Document {i} - "{file.get("name")}" from year {file.get("year")}:\n"""+get_parsed_elements(service, file) for i, file in enumerate(files_list)]
+    files_str = [f"""# Document {i} - "{file.get("name")}" from year {file.get("year")}:\n"""+get_parsed_elements(service, file) for i, file in enumerate(files_list, start=1)]
 
     joined_files_str = "\n\n----------\n\n".join(files_str)
 
@@ -443,7 +443,7 @@ def retrieve(args):
 def parse_args():
     help_msg = """Aaltoes RAG with ChromaDB"""
     parser = argparse.ArgumentParser(description=help_msg, formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--mode", type=str, default="index", choices=["index", "retrieve"], help="index or retrieve")
+    parser.add_argument("--mode", type=str, default="retrieve", choices=["index", "retrieve"], help="index or retrieve")
     parser.add_argument("--model", type=str, default="gpt-4o", choices=VALID_GEMINI_MODELS + VALID_OPENAI_MODELS)
     parser.add_argument("--emb_func", type=str, default="openai", choices=["google", "openai"])  # feel free to add support for more embedding functions
     parser.add_argument("--indx_years", default=[2020])#"Full")

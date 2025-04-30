@@ -1,5 +1,5 @@
 import gradio as gr
-from main import retrieve, VALID_MIMETYPES, FILE_TYPE_MAP, VALID_YEARS, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
+from main import load_dotenv, retrieve, VALID_MIMETYPES, FILE_TYPE_MAP, VALID_YEARS, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
 from dataclasses import dataclass
 
 @dataclass
@@ -13,10 +13,11 @@ class Config:
 
 
 def app(query, top_k, retr_year, llm, emb_model):
+    load_dotenv()
     args = Config(query=query, top_k=top_k, retr_year=retr_year, model=llm, emb_func=emb_model)
     retriever_reponse, files_list = retrieve(args)
-    files_str = [f"""- Document {i} : "{file.get("name")}" from year {file.get("year")}"""for i, file in enumerate(files_list)]
-    joined_files_str = "\n----------\n".join(files_str)
+    files_str = [f"""- Document {i} : "{file.get("name")}" from year {file.get("year")}"""for i, file in enumerate(files_list, start=1)]
+    joined_files_str = "\n".join(files_str)
     return retriever_reponse, joined_files_str
 
 
@@ -33,8 +34,8 @@ demo = gr.Interface(
         gr.Dropdown(label="Embedding Model", choices=["google", "openai"], type="value", value="openai"),
     ],
     outputs=[
-        gr.Markdown(label="RAG Response", show_label=True),
-        gr.Markdown(label="References", show_label=True)
+        gr.Markdown(label="RAG Response", container=True, show_label=True),
+        gr.Markdown(label="References", container=True, show_label=True)
     ],
     theme=gr.themes.Base()
 )
