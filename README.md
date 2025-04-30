@@ -1,35 +1,61 @@
-# Aaltoes Agent
+# Aaltoes AI Search
 
-Aaltoes Agent is an AI-powered tool designed to interact with Google Drive using the `gdrive-mcp` server as a tool. It leverages the `smolagents` library.
+Aaltoes AI Search is a Retrieval-Augmented Generation (RAG) application designed to facilitate intelligent search and question-answering over documents related to Aaltoes (Aalto Entrepreneurship Society). The application leverages Google Drive as a document source, ChromaDB as a vector store, and integrates with state-of-the-art language models like OpenAI's GPT and Google's Gemini.
 
 ## Features
 
-- Interact with Google Drive using the `gdrive-mcp` server.
-- Supports multiple LLM backends (`LiteLLM`, `HfApi`, `Transformers`).
-- Easily configurable and extendable.
+- **Document Retrieval**: Fetch documents from Google Drive based on year and file type.
+- **Question-Answering**: Generate answers to user queries using retrieved documents.
+- **Embedding Models**: Support for OpenAI and Google embedding models.
+- **Language Models**: Integration with OpenAI GPT models and Google's Gemini models.
+- **Document Parsing**: Extract and process content from various file types, using `unstructured` library.
+- **Translation**: Translate Finnish documents to English for better accessibility.
+- **Gradio Interface**: User-friendly web interface for querying and exploring results.
+
 
 ## Prerequisites
 
-- Python 3.11 or higher.
+- Python 3.12 or higher.
 - `uv` as the project manager.
-- You also need my modified version of the `gdrive-mcp` server. You can find my fork [here](https://github.com/MMoshtaghi/servers). (Install it and build it)
+- Google Cloud credentials for accessing Google Drive.
+- API keys for OpenAI and Google Gemini.
 
-## Quick Start
+## Installation
 
 1. Clone the repository:
     ```bash
-    git clone https://github.com/your-repo/aaltoes-agent.git
-    cd aaltoes-agent
+    git clone <repository-url>
+    cd <repository-folder>
     ```
 
-2. Set up your environment variables:
-- Create a .env file in the project root.
-- Add the following variables:
-    - HF_API_KEY=<your_hf_api_key>
-    - GROQ_API_KEY=<your_groq_api>
-    - GDRIVE_MCP_SERVER_BUILD_PATH=<path_to_gdrive_mcp_server>
+2. Set up your environment:
+    - Create a `.env` file in the project root.
+    - Add the following variables:
+        ```env
+        GEMINI_API_KEY=<your-google-gemini-api-key>
+        OPENAI_API_KEY=<your-openai-api-key>
+        CHROMADB_PERSISTED_PATH=./chroma_db
+        ```
 
-3. uv will install and run the project, just run the agent:
+3. uv will create the venv and install dependencies for you when you run the app.
+
+## Quick Start
+
+## Quick Start
+
+1. **Index Documents**:
+    To index documents from Google Drive, run:
     ```bash
-    uv run agent_gdrive.py
+    uv run main.py --mode index
+    ```
+
+2. **Search and Retrieve**:
+    Use the Gradio interface to input your query, select parameters like year, model, and embedding function, and retrieve answers along with document references. To launch the Gradio interface, run:
+    ```bash
+    uv run gr_app.py
+    ```
+
+    you can also use CLI, run:
+    ```bash
+    uv run main.py --mode retrieve --query "your query"
     ```
