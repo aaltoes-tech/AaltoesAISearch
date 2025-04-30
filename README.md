@@ -41,8 +41,6 @@ Aaltoes AI Search is a Retrieval-Augmented Generation (RAG) application designed
 
 ## Quick Start
 
-## Quick Start
-
 1. **Index Documents**:
     To index documents from Google Drive, run:
     ```bash
