@@ -13,6 +13,10 @@ Aaltoes AI Search is a Retrieval-Augmented Generation (RAG) application designed
 - **Gradio Interface**: User-friendly web interface for querying and exploring results.
 - **FastAPI Integration**: Expose indexing and retrieval functionalities via a FastAPI-based REST API.
 
+## TODO
+- **Concurrency and Parallelism**
+- **Agentic coding for spreadsheets**
+
 ## Prerequisites
 
 - Python 3.12 or higher.

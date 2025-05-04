@@ -129,6 +129,7 @@ def get_gdrive_files(service, year:int, mime_type:str) -> list[dict]:
 
 
 def get_file_bytes(service, file:dict) -> bytes:
+    '''get the file content in bytes'''
     import io
     from googleapiclient.http import MediaIoBaseDownload
     try:
@@ -167,11 +168,8 @@ def get_file_bytes(service, file:dict) -> bytes:
         raise e
 
 
-def get_parsed_elements(service, file:dict) -> str:
-    '''get the file content in bytes
-    read and partition the file content'''
-    file_bytes = get_file_bytes(service, file)
-
+def get_parsed_elements(file:dict, file_bytes:bytes) -> str:
+    '''read and partition the file content'''
     from unstructured.partition.auto import partition
     # filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "layout-parser-paper-fast.pdf")
     # with open(filename, "rb") as f:
@@ -310,7 +308,8 @@ def index(args:Config):
             for file in files_list:
                 if file.get("name") == "test me":
                     continue
-                file_str = get_parsed_elements(service, file)
+                file_bytes = get_file_bytes(service, file)
+                file_str = get_parsed_elements(file, file_bytes)
                 
                 question_key_pairs = generate_questions_keywords_from(args, file_str, file, year)
                 
