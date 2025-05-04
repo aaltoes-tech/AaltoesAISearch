@@ -1,24 +1,33 @@
 import gradio as gr
-from main import load_dotenv, retrieve, VALID_MIMETYPES, FILE_TYPE_MAP, VALID_YEARS, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
-from dataclasses import dataclass
+from config import Config, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
+from main import load_dotenv, retrieve
+import argparse
 
-@dataclass
-class Config:
-    query : str
-    top_k : int = 5
-    retr_year : int | str = "Full"
-    model : str = "gpt-4o"
-    emb_func : str = "openai"
-    mode : str = "retrieve"
+# @dataclass
+# class Config:
+#     query : str
+#     top_k : int = 5
+#     retr_year : int | str = "Full"
+#     model : str = "gpt-4o"
+#     emb_func : str = "openai"
+#     mode : str = "retrieve"
 
 
 def app(query, top_k, retr_year, llm, emb_model):
     load_dotenv()
-    args = Config(query=query, top_k=top_k, retr_year=retr_year, model=llm, emb_func=emb_model)
+    args = Config(
+            mode="retrieve",
+            model=llm,
+            emb_func=emb_model,
+            query=query,
+            top_k=top_k,
+            retr_year=retr_year
+        )
+    # args = Config(query=query, top_k=top_k, retr_year=retr_year, model=llm, emb_func=emb_model)
     retriever_reponse, files_list = retrieve(args)
-    files_str = [f"""- Document {i} : "{file.get("name")}" from year {file.get("year")}"""for i, file in enumerate(files_list, start=1)]
-    joined_files_str = "\n".join(files_str)
-    return retriever_reponse, joined_files_str
+    reference_files = [f"""- Document {i} : "{file.get("name")}" from year {file.get("year")}"""for i, file in enumerate(files_list, start=1)]
+    reference_files = "\n".join(reference_files)
+    return retriever_reponse, reference_files
 
 
 demo = gr.Interface(

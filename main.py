@@ -13,30 +13,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 
-VALID_MIMETYPES = [
-    "application/vnd.google-apps.document",
-    "application/vnd.google-apps.presentation",
-    # "application/vnd.google-apps.spreadsheet",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    # "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/pdf"
-]
-FILE_TYPE_MAP = {
-    "MSWords": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "MSPP": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "MSExcel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "PDF": "application/pdf"
-}
-VALID_YEARS = [
-    "2024",
-    "2023",
-    "2022",
-    "2021",
-    "2020",
-]  # Add more years as needed
-VALID_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0"]
-VALID_OPENAI_MODELS = ["gpt-4o", "gpt-3.5-turbo"]
+from config import Config, VALID_MIMETYPES, FILE_TYPE_MAP, VALID_YEARS, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
 
 
 def gdrive_auth():
@@ -67,7 +44,7 @@ def gdrive_auth():
     return creds
 
 
-def get_embedding_function(args):
+def get_embedding_function(args:Config):
     if args.emb_func == "google":
         from langchain_google_genai import GoogleGenerativeAIEmbeddings
         embedding_function = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004",
@@ -82,7 +59,7 @@ def get_embedding_function(args):
     return embedding_function
 
 
-def get_llm(args):
+def get_llm(args:Config):
     if args.model in VALID_GEMINI_MODELS:
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
@@ -94,7 +71,7 @@ def get_llm(args):
                          f"Valid options are: {VALID_GEMINI_MODELS}, {VALID_OPENAI_MODELS}")
 
 
-def get_gdrive_files(service, year, mime_type) -> list:
+def get_gdrive_files(service, year:int, mime_type:str) -> list[dict]:
     """Search file in drive location"""
     try:
         def get_the_year_folder_id(year):
@@ -151,7 +128,7 @@ def get_gdrive_files(service, year, mime_type) -> list:
         raise e
 
 
-def get_file_bytes(service, file):
+def get_file_bytes(service, file:dict) -> bytes:
     import io
     from googleapiclient.http import MediaIoBaseDownload
     try:
@@ -190,7 +167,7 @@ def get_file_bytes(service, file):
         raise e
 
 
-def get_parsed_elements(service, file):
+def get_parsed_elements(service, file:dict) -> str:
     '''get the file content in bytes
     read and partition the file content'''
     file_bytes = get_file_bytes(service, file)
@@ -204,7 +181,7 @@ def get_parsed_elements(service, file):
     return file_str
 
 
-def generate_questions_keywords_from(args, file_str, file, year):
+def generate_questions_keywords_from(args:Config, file_str:str, file:dict, year:int) -> dict[dict]:
     from operator import itemgetter
     # from pydantic import BaseModel, Field
     class FinnishToEnglishTranslation(TypedDict):
@@ -306,7 +283,7 @@ def generate_questions_keywords_from(args, file_str, file, year):
     return question_keys
 
 
-def index(args):
+def index(args:Config):
     creds = gdrive_auth()
     # create drive api client
     service = build("drive", "v3", credentials=creds)
@@ -376,7 +353,7 @@ def get_unique_docs(documents: list) -> list:
     return unique_files_list
 
 
-def generate_retriever_reponse(args, query, joined_files_str):
+def generate_retriever_reponse(args:Config, joined_files_str:str):
     from langchain_core.output_parsers import StrOutputParser
     # from langchain.chains.query_constructor.base import StructuredQueryOutputParser
 
@@ -407,11 +384,11 @@ def generate_retriever_reponse(args, query, joined_files_str):
         | StrOutputParser()
     )
 
-    retriever_reponse = retriever_chain.invoke({"query": query, "docs": joined_files_str})
+    retriever_reponse = retriever_chain.invoke({"query": args.query, "docs": joined_files_str})
     return retriever_reponse
 
 
-def retrieve(args):    
+def retrieve(args:Config):    
     creds = gdrive_auth()
     # create drive api client
     service = build("drive", "v3", credentials=creds)
@@ -436,11 +413,11 @@ def retrieve(args):
 
     joined_files_str = "\n\n----------\n\n".join(files_str)
 
-    retriever_reponse = generate_retriever_reponse(args, args.query, joined_files_str)
+    retriever_reponse = generate_retriever_reponse(args, joined_files_str)
     return retriever_reponse, files_list
 
 
-def parse_args():
+def parse_args() -> Config:
     help_msg = """Aaltoes RAG with ChromaDB"""
     parser = argparse.ArgumentParser(description=help_msg, formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--mode", type=str, default="retrieve", choices=["index", "retrieve"], help="index or retrieve")
@@ -453,7 +430,17 @@ def parse_args():
     parser.add_argument("--retr_year", default="Full", choices=[2024, 2023, 2022, 2021, 2020, "Full"])
     parser.add_argument("--file_type", default="Full", choices=["Full", "MSWords", "MSPP", "MSExcel", "PDF"])
     args = parser.parse_args()
-    return args
+    # Convert argparse.Namespace to Config
+    return Config(
+        mode=args.mode,
+        model=args.model,
+        emb_func=args.emb_func,
+        indx_years=args.indx_years,
+        query=args.query,
+        top_k=args.top_k,
+        retr_year=args.retr_year,
+        file_type=args.file_type,
+    )
 
 
 def main():
