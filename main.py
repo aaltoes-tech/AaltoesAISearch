@@ -2,8 +2,10 @@ import argparse
 from time import sleep
 import os
 import os.path as osp
-from typing import Literal, Optional, Union, List, Dict, Any
+from typing import Literal, Optional, Union, Any
 from typing_extensions import Annotated, TypedDict
+
+import asyncio
 
 from dotenv import load_dotenv
 
@@ -71,31 +73,52 @@ def get_llm(args:Config):
                          f"Valid options are: {VALID_GEMINI_MODELS}, {VALID_OPENAI_MODELS}")
 
 
-def get_gdrive_files(service, year:int, mime_type:str) -> list[dict]:
+def get_gdrive_files(args: Config, service) -> tuple[list[dict], dict]:
     """Search file in drive location"""
     try:
-        def get_the_year_folder_id(year):
+        def get_year_folders(years:list[str]) -> list[dict]:
             # search for the parent folder
-            results = (
-                service.files()
-                .list(
-                    q=f"name='{year}' and mimeType='application/vnd.google-apps.folder'",
-                    fields="nextPageToken, files(id, name)",
-                    supportsAllDrives=True,
-                    includeItemsFromAllDrives=True,
-                    corpora="drive", # in case you want to get access to a specific drive, change it to "drive"
-                    driveId= "0ADYoYJTxCkiiUk9PVA", # add driveId to fields temporarily, to get the ID of a shared drive, then change corpora to 'drive'
+            names_filter = " or ".join([f"name='{year}'" for year in years])
+            folders = []
+            page_token = None
+            while True:
+                # pylint: disable=maybe-no-member
+                response = (
+                    service.files()
+                    .list(
+                        q=f"({names_filter}) and mimeType='application/vnd.google-apps.folder'",
+                        fields="nextPageToken, files(id, name)",
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                        corpora="drive", # in case you want to get access to a specific drive, change it to "drive"
+                        driveId= "0ADYoYJTxCkiiUk9PVA", # add driveId to fields temporarily, to get the ID of a shared drive, then change corpora to 'drive'
+                        pageToken=page_token,
+                    )
+                    .execute()
                 )
-                .execute()
-            )
-            items = results.get("files", [])
-            if not items:
-                print(f"No folder found for {year}")
+                folders.extend(response.get("files", []))
+                page_token = response.get("nextPageToken", None)
+                if page_token is None:
+                    break
+            
+            if len(folders)==0:
+                print(f"No folder found for {years=}")
                 return None
             else:
-                return items[0].get("id")
+                return folders
         
-        parent_folder = get_the_year_folder_id(year)
+        years = VALID_YEARS if args.indx_years=="Full" else args.indx_years
+        parent_folders = get_year_folders(years)
+        parent_folders_filter = [f"""'{parent_folder.get("id")}' in parents""" for parent_folder in parent_folders]
+        parent_folders_filter = " or ".join(parent_folders_filter)
+
+        if args.file_type == "Full":
+            mime_types_filter = [f"""mimeType='{mime_type}'""" for mime_type in VALID_MIMETYPES]
+            mime_types_filter = " or ".join(mime_types_filter)
+        else:
+            mime_types_filter = f"""mimeType='{FILE_TYPE_MAP.get(args.file_type)}'"""
+        
+        query = f"""({parent_folders_filter}) and ({mime_types_filter})"""
         files = []
         page_token = None
         while True:
@@ -103,7 +126,7 @@ def get_gdrive_files(service, year:int, mime_type:str) -> list[dict]:
             response = (
                 service.files()
                 .list(
-                    q= f"'{parent_folder}' in parents and mimeType='{mime_type}'",
+                    q= query,
                     fields="nextPageToken, files(id, name, mimeType, parents, driveId)",
                     supportsAllDrives=True,
                     includeItemsFromAllDrives=True,
@@ -113,14 +136,14 @@ def get_gdrive_files(service, year:int, mime_type:str) -> list[dict]:
                 )
                 .execute()
             )
-            # for file in response.get("files", []):
-            #     # Process change
-                # print(f'        Found file: {file.get("name")}, {file.get("id")}')
             files.extend(response.get("files", []))
             page_token = response.get("nextPageToken", None)
             if page_token is None:
                 break
-        return files
+        
+        
+        id_to_year_map = {folder.get("id"): folder.get("name") for folder in parent_folders}
+        return files, id_to_year_map
 
     except HttpError as error:
         raise error
@@ -179,7 +202,7 @@ def get_parsed_elements(file:dict, file_bytes:bytes) -> str:
     return file_str
 
 
-def generate_questions_keywords_from(args:Config, file_str:str, file:dict, year:int) -> dict[dict]:
+def generate_questions_keywords_from(args:Config, file_str:str, file:dict) -> dict[dict]:
     from operator import itemgetter
     # from pydantic import BaseModel, Field
     class FinnishToEnglishTranslation(TypedDict):
@@ -211,12 +234,12 @@ def generate_questions_keywords_from(args:Config, file_str:str, file:dict, year:
     class QuestionKeywordsPair(TypedDict):
         """A pair of a question and its related keywords."""
         question: Annotated[str, ..., """A question"""]
-        keywords: Annotated[List[str], ..., """Related keywords."""]
+        keywords: Annotated[list[str], ..., """Related keywords."""]
 
     class FinalAnswer(TypedDict):
         """List of question and keywords pairs at general and specific levels."""
-        general_question_keyword_pairs: Annotated[List[QuestionKeywordsPair], ..., """General questions from the whole document and their related keywords."""]
-        specific_question_keyword_pairs: Annotated[List[QuestionKeywordsPair], ..., """Specific questions from the details of the document and their related keywords."""]
+        general_question_keyword_pairs: Annotated[list[QuestionKeywordsPair], ..., """General questions from the whole document and their related keywords."""]
+        specific_question_keyword_pairs: Annotated[list[QuestionKeywordsPair], ..., """Specific questions from the details of the document and their related keywords."""]
     
     question_keyword_template = """You are an expert at generating potential questions and keywords that one might ask from documents.
     Information about the documents:
@@ -277,7 +300,7 @@ def generate_questions_keywords_from(args:Config, file_str:str, file:dict, year:
         # | StrOutputParser()
     )
 
-    question_keys = overall_chain.invoke({"doc": file_str, "name": file.get("name"), "year": year})
+    question_keys = overall_chain.invoke({"doc": file_str, "name": file.get("name"), "year": file.get("year_parent_name")})
     return question_keys
 
 
@@ -294,49 +317,50 @@ def index(args:Config):
                           embedding_function=embedding_function,
                           persist_directory=db_persist_dir)
 
-    years = VALID_YEARS if args.indx_years=="Full" else args.indx_years
+    # years = VALID_YEARS if args.indx_years=="Full" else args.indx_years
     print("preparing docs ...")
-    for year in years:
-        for mime_type in VALID_MIMETYPES:
-            print(f"    Searching for {mime_type} files from {year} ...")
-            files_list = get_gdrive_files(service, year, mime_type)
-            if len(files_list) == 0:
-                print(f"        No {mime_type} files found for {year}")
-                continue
-            print(f"        Found {len(files_list)} {mime_type} files for {year}")
-            
-            for file in files_list:
-                if file.get("name") == "test me":
-                    continue
-                file_bytes = get_file_bytes(service, file)
-                file_str = get_parsed_elements(file, file_bytes)
-                
-                question_key_pairs = generate_questions_keywords_from(args, file_str, file, year)
-                
-                # Docs linked to summaries
-                for question_level in ["general", "specific"]:
-                    # for each question level, we will add the questions to the vector store
-                    # and also add the metadata to the vector store
-                    # but for generation, we will also give the metadata to the LLM 
-                    questions_docs = [
-                        Document(page_content=question_key_pair['question'],
-                                 metadata={"name": file.get("name"),
-                                            "id": file.get("id"),
-                                            "year": year,
-                                            "mimeType": mime_type,
-                                            "level": question_level,
-                                            # "keywords": question_key_pair['keywords'],
-                                            # "potential_users": question_key_pair['potential_users'],
-                                            })
-                        for question_key_pair in question_key_pairs[f"{question_level}_question_keyword_pairs"]
-                    ]
-                    # ! ValueError: Expected metadata value for metadata in Chroma to be a str, int, float or bool, got keywords:List[str] which is a list in upsert.
-                    # ! Try filtering complex metadata from the document using langchain_community.vectorstores.utils.filter_complex_metadata.
-                    # TODO: for generation, we will also give the metadata to the LLM
-                    # continue
-                # continue
-                    vector_store.add_documents(questions_docs)
-            sleep(10)
+    # for year in years:
+    print(f"    Searching for files from ...")
+    files_list, id_to_year_map = get_gdrive_files(args, service)
+    if len(files_list) == 0:
+        print(f"        No files found")
+        return None
+    print(f"        Found {len(files_list)} files")
+    
+    for file in files_list:
+        # Add parent name (year) to each file:
+        file["year_parent_name"] = id_to_year_map.get(file.get("parents")[0], None)
+        
+        if file.get("name") == "test me":
+            continue
+        file_bytes = get_file_bytes(service, file)
+        file_str = get_parsed_elements(file, file_bytes)
+        
+        question_key_pairs = generate_questions_keywords_from(args, file_str, file)
+        
+        # Docs linked to summaries
+        for question_level in ["general", "specific"]:
+            # for each question level, we will add the questions to the vector store
+            # and also add the metadata to the vector store
+            # but for generation, we will also give the metadata to the LLM 
+            questions_docs = [
+                Document(page_content=question_key_pair['question'],
+                            metadata={"name": file.get("name"),
+                                    "id": file.get("id"),
+                                    "year": file.get("year_parent_name"),
+                                    "mimeType": file.get("mimeType"),
+                                    "level": question_level,
+                                    # "keywords": question_key_pair['keywords'],
+                                    # "potential_users": question_key_pair['potential_users'],
+                                    })
+                for question_key_pair in question_key_pairs[f"{question_level}_question_keyword_pairs"]
+            ]
+            # ! ValueError: Expected metadata value for metadata in Chroma to be a str, int, float or bool, got keywords:List[str] which is a list in upsert.
+            # ! Try filtering complex metadata from the document using langchain_community.vectorstores.utils.filter_complex_metadata.
+            # TODO: for generation, we will also give the metadata to the LLM
+            # continue
+        # continue
+            vector_store.add_documents(questions_docs)
     
     # return vector_store
 
@@ -419,14 +443,14 @@ def retrieve(args:Config):
 def parse_args() -> Config:
     help_msg = """Aaltoes RAG with ChromaDB"""
     parser = argparse.ArgumentParser(description=help_msg, formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--mode", type=str, default="retrieve", choices=["index", "retrieve"], help="index or retrieve")
+    parser.add_argument("--mode", type=str, default="index", choices=["index", "retrieve"], help="index or retrieve")
     parser.add_argument("--model", type=str, default="gpt-4o", choices=VALID_GEMINI_MODELS + VALID_OPENAI_MODELS)
     parser.add_argument("--emb_func", type=str, default="openai", choices=["google", "openai"])  # feel free to add support for more embedding functions
-    parser.add_argument("--indx_years", default=[2020])#"Full")
+    parser.add_argument("--indx_years", default="Full")#["2020"]) #"Full")
 
     parser.add_argument("--query", type=str, default="What was the purpose of Aaltoes?")
     parser.add_argument("--top_k", type=int, default=5)
-    parser.add_argument("--retr_year", default="Full", choices=[2024, 2023, 2022, 2021, 2020, "Full"])
+    parser.add_argument("--retr_year", default="Full", choices=["2024", "2023", "2022", "2021", "2020", "Full"])
     parser.add_argument("--file_type", default="Full", choices=["Full", "MSWords", "MSPP", "MSExcel", "PDF"])
     args = parser.parse_args()
     # Convert argparse.Namespace to Config

@@ -32,7 +32,7 @@ class Config(BaseModel):
     mode: str
     model: str
     emb_func: str
-    indx_years: Union[List[int], str] = "Full"
+    indx_years: Union[List[str], str] = "Full"
     query: str = "What was the purpose of Aaltoes?"
     top_k: int = 5
     retr_year: Union[int, str] = "Full"
@@ -58,13 +58,13 @@ class Config(BaseModel):
 
     @field_validator("indx_years", mode="before")
     def validate_years(cls, value):
-        if value != "Full" and not all(str(year) in VALID_YEARS for year in value):
+        if value != "Full" and not all(year in VALID_YEARS for year in value):
             raise ValueError(f"Invalid years for indexing: {value}")
         return value
 
     @field_validator("retr_year", mode="before")
     def validate_retr_year(cls, value):
-        if value != "Full" and str(value) not in VALID_YEARS:
+        if value != "Full" and value not in VALID_YEARS:
             raise ValueError(f"Invalid year for retrieval: {value}")
         return value
 
