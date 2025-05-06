@@ -1,10 +1,10 @@
 import gradio as gr
-from config import Config, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
+from config import APIConfig, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
 from main import load_dotenv, retrieve_async
 import argparse
 
 # @dataclass
-# class Config:
+# class APIConfig:
 #     query : str
 #     top_k : int = 5
 #     retr_year : int | str = "Full"
@@ -15,7 +15,7 @@ import argparse
 
 async def app(query, top_k, retr_year, llm, emb_model):
     load_dotenv()
-    args = Config(
+    args = APIConfig(
             mode="retrieve",
             model=llm,
             emb_func=emb_model,
@@ -23,7 +23,7 @@ async def app(query, top_k, retr_year, llm, emb_model):
             top_k=top_k,
             retr_year=retr_year
         )
-    # args = Config(query=query, top_k=top_k, retr_year=retr_year, model=llm, emb_func=emb_model)
+    # args = APIConfig(query=query, top_k=top_k, retr_year=retr_year, model=llm, emb_func=emb_model)
     retriever_reponse, files_list = await retrieve_async(args)
     reference_files = [f"""- Document {i} : "{file.get("name")}" from year {file.get("year")}"""for i, file in enumerate(files_list, start=1)]
     reference_files = "\n".join(reference_files)

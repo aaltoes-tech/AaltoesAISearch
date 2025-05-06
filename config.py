@@ -1,6 +1,6 @@
 from pydantic import BaseModel, field_validator
 from typing import Literal, Optional, Union, List, Dict, Any
-
+import os
 
 VALID_MIMETYPES = [
     "application/vnd.google-apps.document",
@@ -27,8 +27,25 @@ VALID_YEARS = [
 VALID_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0"]
 VALID_OPENAI_MODELS = ["gpt-4o", "gpt-3.5-turbo"]
 
+# Set up concurrency controls
+class PrfConfig(BaseModel):
+    """
+    Configuration for concurrency settings.
+    """
+    max_num_cores:int = 6  # Adjust based on your system CPU
+    max_concurrent_indexing:int = 10   # Adjust based on system memory and CPU
+    
+    @field_validator("max_num_cores")
+    def validate_mode(cls, value):
+        # the value must be between 0 and the number of cores, and also less than max_concurrent_indexing
+        if value < 0 or value > os.cpu_count():
+            raise ValueError(f"Invalid number of cores. Choose between 0 and {os.cpu_count() - 1}.")
+        if value >= cls.max_concurrent_indexing:
+            raise ValueError(f"Invalid number of cores. Choose less than {cls.max_concurrent_indexing}.")
+        return value
 
-class Config(BaseModel):
+
+class APIConfig(BaseModel):
     mode: str
     model: str
     emb_func: str
@@ -37,7 +54,6 @@ class Config(BaseModel):
     top_k: int = 5
     retr_year: Union[int, str] = "Full"
     file_type: str = "Full"
-    id_to_year_map: Optional[Dict[str, str]] = None
 
     @field_validator("mode")
     def validate_mode(cls, value):

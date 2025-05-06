@@ -16,7 +16,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 
-from config import Config, VALID_MIMETYPES, FILE_TYPE_MAP, VALID_YEARS, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
+from config import APIConfig, PrfConfig, VALID_MIMETYPES, FILE_TYPE_MAP, VALID_YEARS, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
+
 
 
 def gdrive_auth():
@@ -47,7 +48,7 @@ def gdrive_auth():
     return creds
 
 
-def get_embedding_function(args:Config):
+def get_embedding_function(args:APIConfig):
     if args.emb_func == "google":
         from langchain_google_genai import GoogleGenerativeAIEmbeddings
         embedding_function = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004",
@@ -62,7 +63,7 @@ def get_embedding_function(args:Config):
     return embedding_function
 
 
-def get_llm(args:Config):
+def get_llm(args:APIConfig):
     if args.model in VALID_GEMINI_MODELS:
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(model=args.model, google_api_key=os.environ.get("GEMINI_API_KEY"))
@@ -74,7 +75,7 @@ def get_llm(args:Config):
                          f"Valid options are: {VALID_GEMINI_MODELS}, {VALID_OPENAI_MODELS}")
 
 
-def get_gdrive_files(args: Config, creds) -> tuple[list[dict], dict]:
+def get_gdrive_files(args: APIConfig, creds) -> tuple[list[dict], dict]:
     """Search file in drive location"""
     try:
         # create drive api client
@@ -213,7 +214,7 @@ def get_parsed_elements(file:dict, file_bytes:bytes) -> str:
     return file_str
 
 
-async def generate_questions_keywords_async(args:Config, file_str:str, file:dict) -> dict[dict]:
+async def generate_questions_keywords_async(args:APIConfig, file_str:str, file:dict) -> dict[dict]:
     from operator import itemgetter
     # from pydantic import BaseModel, Field
     class FinnishToEnglishTranslation(TypedDict):
@@ -347,13 +348,13 @@ async def add_to_vector_store(file, question_key_pairs, vector_store):
     )
 
 
-async def index_process_single_file(creds, file, args, process_semaphore, process_pool, vector_store):
+async def index_process_single_file(creds, file, args, id_to_year_map, process_semaphore, process_pool, vector_store):
     """Process a single file through the entire pipeline with semaphore control"""
     try:
         # Acquire the process semaphore to limit overall concurrent processing
         async with process_semaphore:
             # Add parent name (year) to file
-            file["year_parent_name"] = args.id_to_year_map.get(file.get("parents")[0], None)
+            file["year_parent_name"] = id_to_year_map.get(file.get("parents")[0], None)
             
             # Download file with concurrency control
             # async with download_semaphore:
@@ -385,7 +386,7 @@ async def index_process_single_file(creds, file, args, process_semaphore, proces
         raise e
 
 
-async def index_async(args:Config):
+async def index_async(args:APIConfig):
     """Asynchronous version of the index function"""
     print("Starting async indexing...")
     
@@ -407,16 +408,11 @@ async def index_async(args:Config):
         print(f"        No files found")
         return None
     print(f"Found {len(files_list)} files")
-    args.id_to_year_map = id_to_year_map  # Store for later use
-    
-    # Set up concurrency controls
-    max_concurrent_processes = 4  # Adjust based on system memory and CPU
     
     # Create semaphores for concurrency control
-    process_semaphore = asyncio.Semaphore(max_concurrent_processes)
-
+    process_semaphore = asyncio.Semaphore(PrfConfig.max_concurrent_indexing)
     # Create process pool for CPU-bound operations
-    process_pool = ProcessPoolExecutor(max_workers= min(4, max_concurrent_processes) )
+    process_pool = ProcessPoolExecutor(max_workers= PrfConfig.max_num_cores)
 
     try:
         # Create a task for each file
@@ -430,6 +426,7 @@ async def index_async(args:Config):
                     creds, 
                     file, 
                     args,
+                    id_to_year_map,
                     process_semaphore, 
                     process_pool, 
                     vector_store
@@ -480,7 +477,7 @@ async def index_async(args:Config):
         #     vector_store.add_documents(questions_docs)
 
 
-def index(args: Config):
+def index(args: APIConfig):
     """Wrapper for the async index function"""
     return asyncio.run(index_async(args), debug=True)
 
@@ -517,7 +514,7 @@ async def retrieve_process_file(creds, file, ref_num, process_semaphore, process
         return None
 
 
-async def generate_retriever_reponse_async(args:Config, joined_files_str:str):
+async def generate_retriever_reponse_async(args:APIConfig, joined_files_str:str):
     from langchain_core.output_parsers import StrOutputParser
     # from langchain.chains.query_constructor.base import StructuredQueryOutputParser
 
@@ -552,7 +549,7 @@ async def generate_retriever_reponse_async(args:Config, joined_files_str:str):
     return retriever_reponse
 
 
-async def retrieve_async(args:Config):
+async def retrieve_async(args:APIConfig):
     """Retrieve documents from the vector store"""
     creds = gdrive_auth()
 
@@ -571,10 +568,10 @@ async def retrieve_async(args:Config):
 
     files_list = get_unique_docs(docs)
 
-    # Set up concurrency controls
-    max_concurrent_processes = 10  # Adjust based on system memory and CPU
-    process_semaphore = asyncio.Semaphore(max_concurrent_processes)
-    process_pool = ProcessPoolExecutor(max_workers=os.cpu_count())
+    # Create semaphores for concurrency control
+    process_semaphore = asyncio.Semaphore(PrfConfig.max_concurrent_indexing)
+    # Create process pool for CPU-bound operations
+    process_pool = ProcessPoolExecutor(max_workers= PrfConfig.max_num_cores)
 
     try:
         # Create tasks for processing files
@@ -597,12 +594,12 @@ async def retrieve_async(args:Config):
         process_pool.shutdown()
 
 
-def retrieve(args:Config):
+def retrieve(args:APIConfig):
     """Wrapper for the async retrieve function"""
     return asyncio.run(retrieve_async(args), debug=True)
 
 
-def parse_args() -> Config:
+def parse_args() -> APIConfig:
     help_msg = """Aaltoes RAG with ChromaDB"""
     parser = argparse.ArgumentParser(description=help_msg, formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--mode", type=str, default="retrieve", choices=["index", "retrieve"], help="index or retrieve")
@@ -615,8 +612,8 @@ def parse_args() -> Config:
     parser.add_argument("--retr_year", default="Full", choices=["2024", "2023", "2022", "2021", "2020", "Full"])
     parser.add_argument("--file_type", default="Full", choices=["Full", "MSWords", "MSPP", "MSExcel", "PDF"])
     args = parser.parse_args()
-    # Convert argparse.Namespace to Config
-    return Config(
+    # Convert argparse.Namespace to APIConfig
+    return APIConfig(
         mode=args.mode,
         model=args.model,
         emb_func=args.emb_func,

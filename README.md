@@ -120,7 +120,7 @@ Aaltoes AI Search is a Retrieval-Augmented Generation (RAG) application designed
 
 ## Configuration
 
-The application uses a `Config` class (based on Pydantic's `BaseModel`) to validate and manage configuration parameters. Key parameters include:
+The application uses a `APIConfig` class (based on Pydantic's `BaseModel`) to validate and manage configuration parameters. Key parameters include:
 
 - `mode`: Operation mode (`index` or `retrieve`).
 - `model`: Language model to use (e.g., `gpt-4o`, `gemini-2.0`).

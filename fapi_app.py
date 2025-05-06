@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from config import Config
+from config import APIConfig
 from main import index_async, retrieve_async, load_dotenv
 
 
@@ -12,10 +12,10 @@ load_dotenv()
 
 
 # Request and Response Models
-class IndexRequest(Config):
+class IndexRequest(APIConfig):
     pass
 
-class RetrieveRequest(Config):
+class RetrieveRequest(APIConfig):
     pass
 
 class RetrieveResponse(BaseModel):
