@@ -1,6 +1,6 @@
 import gradio as gr
 from config import Config, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
-from main import load_dotenv, retrieve
+from main import load_dotenv, retrieve_async
 import argparse
 
 # @dataclass
@@ -13,7 +13,7 @@ import argparse
 #     mode : str = "retrieve"
 
 
-def app(query, top_k, retr_year, llm, emb_model):
+async def app(query, top_k, retr_year, llm, emb_model):
     load_dotenv()
     args = Config(
             mode="retrieve",
@@ -24,7 +24,7 @@ def app(query, top_k, retr_year, llm, emb_model):
             retr_year=retr_year
         )
     # args = Config(query=query, top_k=top_k, retr_year=retr_year, model=llm, emb_func=emb_model)
-    retriever_reponse, files_list = retrieve(args)
+    retriever_reponse, files_list = await retrieve_async(args)
     reference_files = [f"""- Document {i} : "{file.get("name")}" from year {file.get("year")}"""for i, file in enumerate(files_list, start=1)]
     reference_files = "\n".join(reference_files)
     return retriever_reponse, reference_files
@@ -46,7 +46,10 @@ demo = gr.Interface(
         gr.Markdown(label="RAG Response", container=True, show_label=True),
         gr.Markdown(label="References", container=True, show_label=True)
     ],
-    theme=gr.themes.Base()
+    title="Aaltoes AI Search",
+    description="Enter a question about Aaltoes. AI will search for the answer among Aaltoes's Docs.",
+    theme=gr.themes.Base(),
+    concurrency_limit=5
 )
 
 
