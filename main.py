@@ -1,11 +1,12 @@
 import argparse
-from time import sleep
+import time
 import os
 import os.path as osp
 from typing import Literal, Optional, Union, Any
 from typing_extensions import Annotated, TypedDict
 
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
 
 from dotenv import load_dotenv
 
@@ -73,9 +74,12 @@ def get_llm(args:Config):
                          f"Valid options are: {VALID_GEMINI_MODELS}, {VALID_OPENAI_MODELS}")
 
 
-def get_gdrive_files(args: Config, service) -> tuple[list[dict], dict]:
+def get_gdrive_files(args: Config, creds) -> tuple[list[dict], dict]:
     """Search file in drive location"""
     try:
+        # create drive api client
+        service = build("drive", "v3", credentials=creds)
+
         def get_year_folders(years:list[str]) -> list[dict]:
             # search for the parent folder
             names_filter = " or ".join([f"name='{year}'" for year in years])
@@ -151,43 +155,50 @@ def get_gdrive_files(args: Config, service) -> tuple[list[dict], dict]:
         raise e
 
 
-def get_file_bytes(service, file:dict) -> bytes:
-    '''get the file content in bytes'''
+async def get_file_bytes_async(creds, file: dict) -> bytes:
+    '''get the file content in bytes asynchronously'''
     import io
     from googleapiclient.http import MediaIoBaseDownload
+    # create drive api client
+    service = build("drive", "v3", credentials=creds)
+    # create event loop
+    loop = asyncio.get_event_loop()
+    
     try:
-        # For Google Docs/Sheets/etc we need to export
-        if file.get("mimeType").startswith("application/vnd.google-apps"):
-            export_mime_type = {
-                "application/vnd.google-apps.document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "application/vnd.google-apps.spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "application/vnd.google-apps.presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            }.get(file.get("mimeType"), "text/plain")
+        # A function to handle synchronous Google API calls
+        def _download_file():
+            # For Google Docs/Sheets/etc we need to export
+            if file.get("mimeType").startswith("application/vnd.google-apps"):
+                export_mime_type = {
+                    "application/vnd.google-apps.document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/vnd.google-apps.spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "application/vnd.google-apps.presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                }.get(file.get("mimeType"), "text/plain")
 
-            request = service.files().export_media(
-                fileId=file.get("id"), mimeType=export_mime_type
-            )
+                request = service.files().export_media(
+                    fileId=file.get("id"), mimeType=export_mime_type
+                )
+            else:
+                # For regular files, download content
+                request = service.files().get_media(fileId=file.get("id"))
+                
             downloaded_file = io.BytesIO()
             downloader = MediaIoBaseDownload(downloaded_file, request)
             done = False
             while done is False:
                 status, done = downloader.next_chunk()
-            
+                print(f"Download progress for file {file.get('name')}: {int(status.progress() * 100)}%")
+            print(f"Download completed for file {file.get('name')}")
+            downloaded_file.seek(0)  # Reset the file pointer
             return downloaded_file
-        
-        # For regular files, download content
-        request = service.files().get_media(fileId=file.get("id"))
-        downloaded_file = io.BytesIO()
-        downloader = MediaIoBaseDownload(downloaded_file, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-
-        return downloaded_file
-
-    except HttpError as error:
-        raise error
+            
+        # Run the synchronous Google API call in a thread pool
+        return await loop.run_in_executor(None, _download_file)
+    except HttpError as e:
+        print(f"HttpError downloading file {file.get('name')}: {e}")
+        raise e
     except Exception as e:
+        print(f"Error downloading file {file.get('name')}: {e}")
         raise e
 
 
@@ -202,7 +213,7 @@ def get_parsed_elements(file:dict, file_bytes:bytes) -> str:
     return file_str
 
 
-def generate_questions_keywords_from(args:Config, file_str:str, file:dict) -> dict[dict]:
+async def generate_questions_keywords_async(args:Config, file_str:str, file:dict) -> dict[dict]:
     from operator import itemgetter
     # from pydantic import BaseModel, Field
     class FinnishToEnglishTranslation(TypedDict):
@@ -300,69 +311,178 @@ def generate_questions_keywords_from(args:Config, file_str:str, file:dict) -> di
         # | StrOutputParser()
     )
 
-    question_keys = overall_chain.invoke({"doc": file_str, "name": file.get("name"), "year": file.get("year_parent_name")})
+    question_keys = await overall_chain.ainvoke({"doc": file_str, "name": file.get("name"), "year": file.get("year_parent_name")})
     return question_keys
 
 
-def index(args:Config):
+async def add_to_vector_store(file, question_key_pairs, vector_store):
+    """Add questions to vector store"""
+    from langchain_core.documents import Document
+    
+    documents = []
+    
+    # Process both general and specific questions
+    for question_level in ["general", "specific"]:
+        questions_docs = [
+            Document(
+                page_content=question_key_pair['question'],
+                metadata={
+                    "name": file.get("name"),
+                    "id": file.get("id"),
+                    "year": file.get("year_parent_name"),
+                    "mimeType": file.get("mimeType"),
+                    "level": question_level,
+                }
+            )
+            for question_key_pair in question_key_pairs[f"{question_level}_question_keyword_pairs"]
+        ]
+        documents.extend(questions_docs)
+    
+    # Add documents to vector store in a single batch
+    # Run in executor since vector store operations might be blocking
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: vector_store.add_documents(documents)
+    )
+
+
+async def index_process_single_file(creds, file, args, process_semaphore, process_pool, vector_store):
+    """Process a single file through the entire pipeline with semaphore control"""
+    try:
+        # Acquire the process semaphore to limit overall concurrent processing
+        async with process_semaphore:
+            # Add parent name (year) to file
+            file["year_parent_name"] = args.id_to_year_map.get(file.get("parents")[0], None)
+            
+            # Download file with concurrency control
+            # async with download_semaphore:
+            print(f"Downloading {file.get('name')}...")
+            file_bytes = await get_file_bytes_async(creds, file)
+            
+            # Parse file content (CPU-bound) in process pool
+            print(f"Parsing {file.get('name')}...")
+            file_str = await asyncio.get_event_loop().run_in_executor(
+                process_pool,
+                get_parsed_elements,
+                file,
+                file_bytes
+            )
+            
+            # Generate questions and keywords (I/O-bound LLM call)
+            print(f"Generating questions for {file.get('name')}...")
+            question_key_pairs = await generate_questions_keywords_async(args, file_str, file)
+            
+            # Add to vector store
+            print(f"Adding to vector store: {file.get('name')}...")
+            await add_to_vector_store(file, question_key_pairs, vector_store)
+            
+            print(f"Completed processing {file.get('name')}")
+            return {"file": file.get("name"), "status": "completed"}
+        
+    except Exception as e:
+        print(f"Error in process_single_file for {file.get('name')}: {e}")
+        raise e
+
+
+async def index_async(args:Config):
+    """Asynchronous version of the index function"""
+    print("Starting async indexing...")
+    
+    # Initialize services
     creds = gdrive_auth()
-    # create drive api client
-    service = build("drive", "v3", credentials=creds)
 
     embedding_function = get_embedding_function(args)
 
-    from langchain_core.documents import Document
+    # Initialize vector store
     db_persist_dir = os.environ.get(key="CHROMADB_PERSISTED_PATH", default="./chroma_db")
     vector_store = Chroma(collection_name="Questions_and_Keywords",
                           embedding_function=embedding_function,
                           persist_directory=db_persist_dir)
 
-    # years = VALID_YEARS if args.indx_years=="Full" else args.indx_years
-    print("preparing docs ...")
-    # for year in years:
-    print(f"    Searching for files from ...")
-    files_list, id_to_year_map = get_gdrive_files(args, service)
+    # Get files info
+    print("Preparing docs ...")
+    files_list, id_to_year_map = get_gdrive_files(args, creds)
     if len(files_list) == 0:
         print(f"        No files found")
         return None
-    print(f"        Found {len(files_list)} files")
+    print(f"Found {len(files_list)} files")
+    args.id_to_year_map = id_to_year_map  # Store for later use
     
-    for file in files_list:
-        # Add parent name (year) to each file:
-        file["year_parent_name"] = id_to_year_map.get(file.get("parents")[0], None)
-        
-        if file.get("name") == "test me":
-            continue
-        file_bytes = get_file_bytes(service, file)
-        file_str = get_parsed_elements(file, file_bytes)
-        
-        question_key_pairs = generate_questions_keywords_from(args, file_str, file)
-        
-        # Docs linked to summaries
-        for question_level in ["general", "specific"]:
-            # for each question level, we will add the questions to the vector store
-            # and also add the metadata to the vector store
-            # but for generation, we will also give the metadata to the LLM 
-            questions_docs = [
-                Document(page_content=question_key_pair['question'],
-                            metadata={"name": file.get("name"),
-                                    "id": file.get("id"),
-                                    "year": file.get("year_parent_name"),
-                                    "mimeType": file.get("mimeType"),
-                                    "level": question_level,
-                                    # "keywords": question_key_pair['keywords'],
-                                    # "potential_users": question_key_pair['potential_users'],
-                                    })
-                for question_key_pair in question_key_pairs[f"{question_level}_question_keyword_pairs"]
-            ]
-            # ! ValueError: Expected metadata value for metadata in Chroma to be a str, int, float or bool, got keywords:List[str] which is a list in upsert.
-            # ! Try filtering complex metadata from the document using langchain_community.vectorstores.utils.filter_complex_metadata.
-            # TODO: for generation, we will also give the metadata to the LLM
-            # continue
-        # continue
-            vector_store.add_documents(questions_docs)
+    # Set up concurrency controls
+    max_concurrent_processes = 4  # Adjust based on system memory and CPU
     
-    # return vector_store
+    # Create semaphores for concurrency control
+    process_semaphore = asyncio.Semaphore(max_concurrent_processes)
+
+    # Create process pool for CPU-bound operations
+    process_pool = ProcessPoolExecutor(max_workers= min(4, max_concurrent_processes) )
+
+    try:
+        # Create a task for each file
+        tasks = []
+        for file in files_list:
+            if file.get("name") == "test me":
+                continue
+                
+            task = asyncio.create_task(
+                index_process_single_file(
+                    creds, 
+                    file, 
+                    args,
+                    process_semaphore, 
+                    process_pool, 
+                    vector_store
+                )
+            )
+            tasks.append(task)
+        
+        # Process all files concurrently with controlled concurrency
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Check for any exceptions
+        success_count = 0
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"Error processing file: {result}")
+            else:
+                success_count += 1
+        
+        print(f"Indexing completed. Successfully processed {success_count} out of {len(tasks)} files.")
+        return vector_store
+        
+    finally:
+        # Clean up resources
+        process_pool.shutdown()
+
+        # # Docs linked to summaries
+        # for question_level in ["general", "specific"]:
+        #     # for each question level, we will add the questions to the vector store
+        #     # and also add the metadata to the vector store
+        #     # but for generation, we will also give the metadata to the LLM 
+        #     questions_docs = [
+        #         Document(page_content=question_key_pair['question'],
+        #                     metadata={"name": file.get("name"),
+        #                             "id": file.get("id"),
+        #                             "year": file.get("year_parent_name"),
+        #                             "mimeType": file.get("mimeType"),
+        #                             "level": question_level,
+        #                             # "keywords": question_key_pair['keywords'],
+        #                             # "potential_users": question_key_pair['potential_users'],
+        #                             })
+        #         for question_key_pair in question_key_pairs[f"{question_level}_question_keyword_pairs"]
+        #     ]
+        #     # ! ValueError: Expected metadata value for metadata in Chroma to be a str, int, float or bool, got keywords:List[str] which is a list in upsert.
+        #     # ! Try filtering complex metadata from the document using langchain_community.vectorstores.utils.filter_complex_metadata.
+        #     # TODO: for generation, we will also give the metadata to the LLM
+        #     # continue
+        # # continue
+        #     vector_store.add_documents(questions_docs)
+
+
+def index(args: Config):
+    """Wrapper for the async index function"""
+    return asyncio.run(index_async(args), debug=True)
 
 
 def get_unique_docs(documents: list) -> list:
@@ -376,7 +496,28 @@ def get_unique_docs(documents: list) -> list:
     return unique_files_list
 
 
-def generate_retriever_reponse(args:Config, joined_files_str:str):
+async def retrieve_process_file(creds, file, ref_num, process_semaphore, process_pool):
+    try:
+        # Acquire the process semaphore to limit overall concurrent processing
+        async with process_semaphore:
+            # Download file content
+            print(f"Downloading {file.get('name')}...")
+            file_bytes = await get_file_bytes_async(creds, file)
+
+            # Parse file content (CPU-bound)
+            print(f"Parsing {file.get('name')}...")
+            file_str = await asyncio.get_event_loop().run_in_executor(
+                process_pool, get_parsed_elements, file, file_bytes
+            )
+
+            # Format the parsed content for aggregation
+            return f"# Document reference {ref_num} - {file.get('name')} from year {file.get('year')}:\n{file_str}"
+    except Exception as e:
+        print(f"Error processing file {file.get('name')}: {e}")
+        return None
+
+
+async def generate_retriever_reponse_async(args:Config, joined_files_str:str):
     from langchain_core.output_parsers import StrOutputParser
     # from langchain.chains.query_constructor.base import StructuredQueryOutputParser
 
@@ -407,18 +548,16 @@ def generate_retriever_reponse(args:Config, joined_files_str:str):
         | StrOutputParser()
     )
 
-    retriever_reponse = retriever_chain.invoke({"query": args.query, "docs": joined_files_str})
+    retriever_reponse = await retriever_chain.ainvoke({"query": args.query, "docs": joined_files_str})
     return retriever_reponse
 
 
-def retrieve(args:Config):    
+async def retrieve_async(args:Config):
+    """Retrieve documents from the vector store"""
     creds = gdrive_auth()
-    # create drive api client
-    service = build("drive", "v3", credentials=creds)
 
     embedding_function = get_embedding_function(args)
-
-    from langchain_core.documents import Document
+    # Initialize vector store
     db_persist_dir = os.environ.get(key="CHROMADB_PERSISTED_PATH", default="./chroma_db")
     vector_store = Chroma(collection_name="Questions_and_Keywords",
                           embedding_function=embedding_function,
@@ -431,22 +570,45 @@ def retrieve(args:Config):
                                               filter={"year": args.retr_year})
 
     files_list = get_unique_docs(docs)
-    
-    files_str = [f"""# Document {i} - "{file.get("name")}" from year {file.get("year")}:\n"""+get_parsed_elements(service, file) for i, file in enumerate(files_list, start=1)]
 
-    joined_files_str = "\n\n----------\n\n".join(files_str)
+    # Set up concurrency controls
+    max_concurrent_processes = 10  # Adjust based on system memory and CPU
+    process_semaphore = asyncio.Semaphore(max_concurrent_processes)
+    process_pool = ProcessPoolExecutor(max_workers=os.cpu_count())
 
-    retriever_reponse = generate_retriever_reponse(args, joined_files_str)
-    return retriever_reponse, files_list
+    try:
+        # Create tasks for processing files
+        tasks = [retrieve_process_file(
+            creds, file, ref_num, process_semaphore, process_pool
+            ) for ref_num, file in enumerate(files_list, start=1) ]
+        parsed_files = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Filter out None results and aggregate parsed content
+        parsed_files = [content for content in parsed_files if content is not None]
+        joined_files_str = "\n\n----------\n\n".join(parsed_files)
+
+        # Generate the final response using the LLM
+        print("Generating final response...")
+        retriever_response = await generate_retriever_reponse_async(args, joined_files_str)
+
+        return retriever_response, files_list
+    finally:
+        # Clean up resources
+        process_pool.shutdown()
+
+
+def retrieve(args:Config):
+    """Wrapper for the async retrieve function"""
+    return asyncio.run(retrieve_async(args), debug=True)
 
 
 def parse_args() -> Config:
     help_msg = """Aaltoes RAG with ChromaDB"""
     parser = argparse.ArgumentParser(description=help_msg, formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--mode", type=str, default="index", choices=["index", "retrieve"], help="index or retrieve")
+    parser.add_argument("--mode", type=str, default="retrieve", choices=["index", "retrieve"], help="index or retrieve")
     parser.add_argument("--model", type=str, default="gpt-4o", choices=VALID_GEMINI_MODELS + VALID_OPENAI_MODELS)
     parser.add_argument("--emb_func", type=str, default="openai", choices=["google", "openai"])  # feel free to add support for more embedding functions
-    parser.add_argument("--indx_years", default="Full")#["2020"]) #"Full")
+    parser.add_argument("--indx_years", default=["2024"]) #"Full")
 
     parser.add_argument("--query", type=str, default="What was the purpose of Aaltoes?")
     parser.add_argument("--top_k", type=int, default=5)

@@ -37,6 +37,7 @@ class Config(BaseModel):
     top_k: int = 5
     retr_year: Union[int, str] = "Full"
     file_type: str = "Full"
+    id_to_year_map: Optional[Dict[str, str]] = None
 
     @field_validator("mode")
     def validate_mode(cls, value):
