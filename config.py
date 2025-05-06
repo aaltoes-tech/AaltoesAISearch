@@ -32,8 +32,8 @@ class PrfConfig(BaseModel):
     """
     Configuration for concurrency settings.
     """
-    max_num_cores:int = 6  # Adjust based on your system CPU
-    max_concurrent_indexing:int = 10   # Adjust based on system memory and CPU
+    max_num_cores:int = 8  # Adjust based on your system CPU
+    max_concurrent_indexing:int = 16   # Adjust based on system memory and CPU
     
     @field_validator("max_num_cores")
     def validate_mode(cls, value):

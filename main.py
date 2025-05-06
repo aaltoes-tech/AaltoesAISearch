@@ -18,6 +18,7 @@ from googleapiclient.errors import HttpError
 
 from config import APIConfig, PrfConfig, VALID_MIMETYPES, FILE_TYPE_MAP, VALID_YEARS, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
 
+prf_config = PrfConfig()
 
 
 def gdrive_auth():
@@ -188,8 +189,8 @@ async def get_file_bytes_async(creds, file: dict) -> bytes:
             done = False
             while done is False:
                 status, done = downloader.next_chunk()
-                print(f"Download progress for file {file.get('name')}: {int(status.progress() * 100)}%")
-            print(f"Download completed for file {file.get('name')}")
+                # print(f"Download progress for file {file.get('name')}: {int(status.progress() * 100)}%")
+            # print(f"Download completed for file {file.get('name')}")
             downloaded_file.seek(0)  # Reset the file pointer
             return downloaded_file
             
@@ -206,12 +207,14 @@ async def get_file_bytes_async(creds, file: dict) -> bytes:
 def get_parsed_elements(file:dict, file_bytes:bytes) -> str:
     '''read and partition the file content'''
     from unstructured.partition.auto import partition
-    # filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "layout-parser-paper-fast.pdf")
-    # with open(filename, "rb") as f:
-    elements = partition(file=file_bytes, content_type=file.get("mimeType"))
-    file_str = "\n\n".join([str(el) for el in elements]) # [:20])
+    try:
+        elements = partition(file=file_bytes, content_type=file.get("mimeType"))
+        file_str = "\n\n".join([str(el) for el in elements]) # [:20])
 
-    return file_str
+        return file_str
+    except Exception as e:
+        print(f"Error in get_parsed_elements for file {file.get('name')}: {e}")
+        raise e
 
 
 async def generate_questions_keywords_async(args:APIConfig, file_str:str, file:dict) -> dict[dict]:
@@ -226,126 +229,136 @@ async def generate_questions_keywords_async(args:APIConfig, file_str:str, file:d
 
     from langchain_core.prompts import ChatPromptTemplate
 
-    translate_template = """You are an expert at translating Finnish documents into English.
-        - If the document is in Finnish with a few English words and names, return its full English translation.
-        - If the document is a mix of Finnish and English, return the full English translation.
-        - If the document is already in English with a few Finnish words and names, then just return 'None'
-        - Remember to keep the original names of humans and places in the document.
-        - Make sure that the translation (if any) has the same structure as the original document.
-        - Here is the document:\n\n{doc}"""
-    translate_prompt = ChatPromptTemplate.from_template(translate_template)
-    translate_llm = get_llm(args)
-    # output_parser = StructuredQueryOutputParser.from_components()
+    try:
+        translate_template = """You are an expert at translating Finnish documents into English.
+            - If the document is in Finnish with a few English words and names, return its full English translation.
+            - If the document is a mix of Finnish and English, return the full English translation.
+            - If the document is already in English with a few Finnish words and names, then just return 'None'
+            - Remember to keep the original names of humans and places in the document.
+            - Make sure that the translation (if any) has the same structure as the original document.
+            - Here is the document:\n\n{doc}"""
+        translate_prompt = ChatPromptTemplate.from_template(translate_template)
+        translate_llm = get_llm(args)
+        # output_parser = StructuredQueryOutputParser.from_components()
 
-    translate_chain = (
-        translate_prompt
-        | translate_llm.with_structured_output(schema=FinnishToEnglishTranslation)
-        # | output_parser
-    )
+        translate_chain = (
+            translate_prompt
+            | translate_llm.with_structured_output(schema=FinnishToEnglishTranslation)
+            # | output_parser
+        )
 
-    class QuestionKeywordsPair(TypedDict):
-        """A pair of a question and its related keywords."""
-        question: Annotated[str, ..., """A question"""]
-        keywords: Annotated[list[str], ..., """Related keywords."""]
+        class QuestionKeywordsPair(TypedDict):
+            """A pair of a question and its related keywords."""
+            question: Annotated[str, ..., """A question"""]
+            keywords: Annotated[list[str], ..., """Related keywords."""]
 
-    class FinalAnswer(TypedDict):
-        """List of question and keywords pairs at general and specific levels."""
-        general_question_keyword_pairs: Annotated[list[QuestionKeywordsPair], ..., """General questions from the whole document and their related keywords."""]
-        specific_question_keyword_pairs: Annotated[list[QuestionKeywordsPair], ..., """Specific questions from the details of the document and their related keywords."""]
+        class FinalAnswer(TypedDict):
+            """List of question and keywords pairs at general and specific levels."""
+            general_question_keyword_pairs: Annotated[list[QuestionKeywordsPair], ..., """General questions from the whole document and their related keywords."""]
+            specific_question_keyword_pairs: Annotated[list[QuestionKeywordsPair], ..., """Specific questions from the details of the document and their related keywords."""]
+        
+        question_keyword_template = """You are an expert at generating potential questions and keywords that one might ask from documents.
+        Information about the documents:
+        - The documents are from a database belonging to Aaltoes (Aalto Entrepreneurship Society) which is a student-led organization in Aalto University, Finland.
+        - The documents are about the Aaltoes organization, its past activities and its past members.
+
+        Information about the questions and keywords:
+        - You generate both general questions (from the whole document) and specific questions (from the details of the document).
+        - For each question, you also generate a list of important keywords that are relevant to the question.
+        - These questions and keywords are to be stored in a database that is linked to the document datastore.
+        - When an Aaltoes member or a visitor ask a question, the system will search for the most relevant question and keywords, and then returns the linked documents.
+        - Therefore, the questions must be INDEPENDENT of each other, and must not refer to each other.
+        - Questions also must not refer to a prior knowledge of the document (e.g. 'what was "the" trip about?', instead of "the" mention the trip name).
+        - Questions must be about the Aaltoes organization, its past activities and its past members and formulated in the past tense.
+        - Extract all the questions that are about these topics at both general and specific level.
+        - Some documents may be vague and clear what they are about, so you can use the name and year of the document in the questions to clarify the question.
+        - If there are acronyms, words, or names of human and places that you are not familiar with, do not try to rephrase them.
+
+        Here are some examples of the questions that we are interested in:
+        - General questions:
+            - What was the purpose of Aaltoes?
+            - What trips did Aaltoes have in 2024?
+            - What kind of partnership deals were signed with Aaltoes in 2021?
+            - What happened in the X event?
+            - Where was location of the X event?
+            - Who was the president of Aaltoes in 2022?
+            - How many members did Aaltoes have overall in 2022?
+            - How many partners did Aaltoes have overall in 2021?
+            - How much money did Aaltoes receive in general in 2021?
+            - How much did Aaltoes spend in general in 2022?
+            - What media coverage was Aaltoes featured in overall?
+
+        - Specific questions:
+            - What was the responsibilities of Maija in the X event?
+            - What was the terms of the partnership deal with X company?
+            - How much was the salary of the president of Aaltoes in 2019?
+            - How much money did Aaltoes receive from just Aalto university in 2021?
+            - How much did Aaltoes spend on just orientation week 2022?
+            - When was the deadline for payment of the purchases of the X event?
+            - Who from Aaltoes was/were responsible for the London trip?
+            - Who was the main speaker of the X event?
+        
+        
+        Given the following document, named "{name}" from year {year}, return as many question and keyword pairs as you can, based on the instructions:\n
+        The document in original language:\n\n{doc}\n\n
+        ------------------------\n\n
+        The document translation to English (if the original is not in English):\n\n{translation}"""
+        question_keyword_prompt = ChatPromptTemplate.from_template(question_keyword_template)
+
+        question_keyword_llm = get_llm(args)
+
+        overall_chain = (
+            {"doc": itemgetter("doc"),
+            "name": itemgetter("name"),
+            "year": itemgetter("year"),
+            "translation": itemgetter("doc") | translate_chain | itemgetter("translation")}
+            | question_keyword_prompt
+            | question_keyword_llm.with_structured_output(schema=FinalAnswer)
+            # | StrOutputParser()
+        )
+
+        question_keys = await overall_chain.ainvoke({"doc": file_str, "name": file.get("name"), "year": file.get("year_parent_name")})
+        return question_keys
     
-    question_keyword_template = """You are an expert at generating potential questions and keywords that one might ask from documents.
-    Information about the documents:
-    - The documents are from a database belonging to Aaltoes (Aalto Entrepreneurship Society) which is a student-led organization in Aalto University, Finland.
-    - The documents are about the Aaltoes organization, its past activities and its past members.
-
-    Information about the questions and keywords:
-    - You generate both general questions (from the whole document) and specific questions (from the details of the document).
-    - For each question, you also generate a list of important keywords that are relevant to the question.
-    - These questions and keywords are to be stored in a database that is linked to the document datastore.
-    - When an Aaltoes member or a visitor ask a question, the system will search for the most relevant question and keywords, and then returns the linked documents.
-    - Therefore, the questions must be INDEPENDENT of each other, and must not refer to each other.
-    - Questions also must not refer to a prior knowledge of the document (e.g. 'what was "the" trip about?', instead of "the" mention the trip name).
-    - Questions must be about the Aaltoes organization, its past activities and its past members and formulated in the past tense.
-    - Extract all the questions that are about these topics at both general and specific level.
-    - If there are acronyms, words, or names of human and places that you are not familiar with, do not try to rephrase them.
-
-    Here are some examples of the questions:
-    - General questions:
-        - What was the purpose of Aaltoes?
-        - What trips did Aaltoes have in 2024?
-        - What kind of partnership deals were signed with Aaltoes in 2021?
-        - What happened in the X event?
-        - Where was location of the X event?
-        - Who was the president of Aaltoes in 2022?
-        - How many members did Aaltoes have overall in 2022?
-        - How many partners did Aaltoes have overall in 2021?
-        - How much money did Aaltoes receive in general in 2021?
-        - How much did Aaltoes spend in general in 2022?
-        - What media coverage was Aaltoes featured in overall?
-
-    - Specific questions:
-        - What was the responsibilities of Maija in the X event?
-        - What was the terms of the partnership deal with X company?
-        - How much was the salary of the president of Aaltoes in 2019?
-        - How much money did Aaltoes receive from just Aalto university in 2021?
-        - How much did Aaltoes spend on just orientation week 2022?
-        - When was the deadline for payment of the purchases of the X event?
-        - Who from Aaltoes was/were responsible for the London trip?
-        - Who was the main speaker of the X event?
-    
-    
-    Given the following document, named "{name}" from year {year}, return as many question and keyword pairs as you can, based on the instructions:\n
-    The document in original language:\n\n{doc}\n\n
-    ------------------------\n\n
-    The document translation to English (if the original is not in English):\n\n{translation}"""
-    question_keyword_prompt = ChatPromptTemplate.from_template(question_keyword_template)
-
-    question_keyword_llm = get_llm(args)
-
-    overall_chain = (
-        {"doc": itemgetter("doc"),
-         "name": itemgetter("name"),
-         "year": itemgetter("year"),
-         "translation": itemgetter("doc") | translate_chain | itemgetter("translation")}
-        | question_keyword_prompt
-        | question_keyword_llm.with_structured_output(schema=FinalAnswer)
-        # | StrOutputParser()
-    )
-
-    question_keys = await overall_chain.ainvoke({"doc": file_str, "name": file.get("name"), "year": file.get("year_parent_name")})
-    return question_keys
+    except Exception as e:
+        print(f"Error in generate_questions_keywords_async for file {file.get('name')}: {e}")
+        raise e
 
 
 async def add_to_vector_store(file, question_key_pairs, vector_store):
     """Add questions to vector store"""
     from langchain_core.documents import Document
-    
-    documents = []
-    
-    # Process both general and specific questions
-    for question_level in ["general", "specific"]:
-        questions_docs = [
-            Document(
-                page_content=question_key_pair['question'],
-                metadata={
-                    "name": file.get("name"),
-                    "id": file.get("id"),
-                    "year": file.get("year_parent_name"),
-                    "mimeType": file.get("mimeType"),
-                    "level": question_level,
-                }
-            )
-            for question_key_pair in question_key_pairs[f"{question_level}_question_keyword_pairs"]
-        ]
-        documents.extend(questions_docs)
-    
-    # Add documents to vector store in a single batch
-    # Run in executor since vector store operations might be blocking
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None,
-        lambda: vector_store.add_documents(documents)
-    )
+    try:
+        documents = []
+        
+        # Process both general and specific questions
+        for question_level in ["general", "specific"]:
+            questions_docs = [
+                Document(
+                    page_content=question_key_pair['question'],
+                    metadata={
+                        "name": file.get("name"),
+                        "id": file.get("id"),
+                        "year": file.get("year_parent_name"),
+                        "mimeType": file.get("mimeType"),
+                        "level": question_level,
+                    }
+                )
+                for question_key_pair in question_key_pairs[f"{question_level}_question_keyword_pairs"]
+            ]
+            documents.extend(questions_docs)
+        
+        # Add documents to vector store in a single batch
+        # Run in executor since vector store operations might be blocking
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: vector_store.add_documents(documents)
+        )
+
+    except Exception as e:
+        print(f"Error adding to vector store for file {file.get('name')}: {e}")
+        raise e
 
 
 async def index_process_single_file(creds, file, args, id_to_year_map, process_semaphore, process_pool, vector_store):
@@ -358,11 +371,11 @@ async def index_process_single_file(creds, file, args, id_to_year_map, process_s
             
             # Download file with concurrency control
             # async with download_semaphore:
-            print(f"Downloading {file.get('name')}...")
+            # print(f"Downloading {file.get('name')}...")
             file_bytes = await get_file_bytes_async(creds, file)
             
             # Parse file content (CPU-bound) in process pool
-            print(f"Parsing {file.get('name')}...")
+            # print(f"Parsing {file.get('name')}...")
             file_str = await asyncio.get_event_loop().run_in_executor(
                 process_pool,
                 get_parsed_elements,
@@ -371,11 +384,11 @@ async def index_process_single_file(creds, file, args, id_to_year_map, process_s
             )
             
             # Generate questions and keywords (I/O-bound LLM call)
-            print(f"Generating questions for {file.get('name')}...")
+            # print(f"Generating questions for {file.get('name')}...")
             question_key_pairs = await generate_questions_keywords_async(args, file_str, file)
             
             # Add to vector store
-            print(f"Adding to vector store: {file.get('name')}...")
+            # print(f"Adding to vector store: {file.get('name')}...")
             await add_to_vector_store(file, question_key_pairs, vector_store)
             
             print(f"Completed processing {file.get('name')}")
@@ -410,9 +423,9 @@ async def index_async(args:APIConfig):
     print(f"Found {len(files_list)} files")
     
     # Create semaphores for concurrency control
-    process_semaphore = asyncio.Semaphore(PrfConfig.max_concurrent_indexing)
+    process_semaphore = asyncio.Semaphore(prf_config.max_concurrent_indexing)
     # Create process pool for CPU-bound operations
-    process_pool = ProcessPoolExecutor(max_workers= PrfConfig.max_num_cores)
+    process_pool = ProcessPoolExecutor(max_workers= prf_config.max_num_cores)
 
     try:
         # Create a task for each file
@@ -447,6 +460,10 @@ async def index_async(args:APIConfig):
         
         print(f"Indexing completed. Successfully processed {success_count} out of {len(tasks)} files.")
         return vector_store
+    
+    except Exception as e:
+        print(f"Error in index_async: {e}")
+        raise e
         
     finally:
         # Clean up resources
@@ -479,7 +496,7 @@ async def index_async(args:APIConfig):
 
 def index(args: APIConfig):
     """Wrapper for the async index function"""
-    return asyncio.run(index_async(args), debug=True)
+    return asyncio.run(index_async(args), debug=False)
 
 
 def get_unique_docs(documents: list) -> list:
@@ -520,33 +537,37 @@ async def generate_retriever_reponse_async(args:APIConfig, joined_files_str:str)
 
     from langchain_core.prompts import ChatPromptTemplate
 
-    retriever_template = """You are a helpful assistant that answers questions based on the documents provided.
-    Information about the documents:
-    - The documents are retrieved from a database belonging to Aaltoes (Aalto Entrepreneurship Society) which is a student-led organization in Aalto University, Finland.
-    - The documents are about the Aaltoes organization, its past activities and its past members.
-    - If you are unable to answer the question based on the retrieved documents, then you can ask the user to either:
-        - rephrase the question,
-        - increase the "top k" value.
-        - or narrow down the search by filtering the documents by year. 
-    
-    - Although there might be some documents that are in Finnish language, you must answer the question only in English.
-    - Write your answer in Markdown format, and cite the documents you used to answer the question by their number (Document i).
+    try:
+        retriever_template = """You are a helpful assistant that answers questions based on the documents provided.
+        Information about the documents:
+        - The documents are retrieved from a database belonging to Aaltoes (Aalto Entrepreneurship Society) which is a student-led organization in Aalto University, Finland.
+        - The documents are about the Aaltoes organization, its past activities and its past members.
+        - If you are unable to answer the question based on the retrieved documents, then you can ask the user to either:
+            - rephrase the question,
+            - increase the "top k" value.
+            - or narrow down the search by filtering the documents by year. 
+        
+        - Although there might be some documents that are in Finnish language, you must answer the question only in English.
+        - Write your answer in Markdown format, and cite the documents you used to answer the question by their number (Document i).
 
-    - Here is the query:\n\n{query}\n
-    - Here are the retrieved documents from the database:\n\n{docs}\n
-    - Here is the query again:\n\n{query}"""
-    
-    retriever_prompt = ChatPromptTemplate.from_template(retriever_template)
-    retriever_llm = get_llm(args)
+        - Here is the query:\n\n{query}\n
+        - Here are the retrieved documents from the database:\n\n{docs}\n
+        - Here is the query again:\n\n{query}"""
+        
+        retriever_prompt = ChatPromptTemplate.from_template(retriever_template)
+        retriever_llm = get_llm(args)
 
-    retriever_chain = (
-        retriever_prompt
-        | retriever_llm
-        | StrOutputParser()
-    )
+        retriever_chain = (
+            retriever_prompt
+            | retriever_llm
+            | StrOutputParser()
+        )
 
-    retriever_reponse = await retriever_chain.ainvoke({"query": args.query, "docs": joined_files_str})
-    return retriever_reponse
+        retriever_reponse = await retriever_chain.ainvoke({"query": args.query, "docs": joined_files_str})
+        return retriever_reponse
+    except Exception as e:
+        print(f"Error in generate_retriever_reponse_async: {e}")
+        raise e
 
 
 async def retrieve_async(args:APIConfig):
@@ -569,9 +590,9 @@ async def retrieve_async(args:APIConfig):
     files_list = get_unique_docs(docs)
 
     # Create semaphores for concurrency control
-    process_semaphore = asyncio.Semaphore(PrfConfig.max_concurrent_indexing)
+    process_semaphore = asyncio.Semaphore(prf_config.max_concurrent_indexing)
     # Create process pool for CPU-bound operations
-    process_pool = ProcessPoolExecutor(max_workers= PrfConfig.max_num_cores)
+    process_pool = ProcessPoolExecutor(max_workers= prf_config.max_num_cores)
 
     try:
         # Create tasks for processing files
@@ -589,6 +610,9 @@ async def retrieve_async(args:APIConfig):
         retriever_response = await generate_retriever_reponse_async(args, joined_files_str)
 
         return retriever_response, files_list
+    except Exception as e:
+        print(f"Error in retrieve_async: {e}")
+        raise e
     finally:
         # Clean up resources
         process_pool.shutdown()
@@ -596,7 +620,7 @@ async def retrieve_async(args:APIConfig):
 
 def retrieve(args:APIConfig):
     """Wrapper for the async retrieve function"""
-    return asyncio.run(retrieve_async(args), debug=True)
+    return asyncio.run(retrieve_async(args), debug=False)
 
 
 def parse_args() -> APIConfig:
@@ -608,7 +632,7 @@ def parse_args() -> APIConfig:
     parser.add_argument("--indx_years", default=["2024"]) #"Full")
 
     parser.add_argument("--query", type=str, default="What was the purpose of Aaltoes?")
-    parser.add_argument("--top_k", type=int, default=5)
+    parser.add_argument("--top_k", type=int, default=10)
     parser.add_argument("--retr_year", default="Full", choices=["2024", "2023", "2022", "2021", "2020", "Full"])
     parser.add_argument("--file_type", default="Full", choices=["Full", "MSWords", "MSPP", "MSExcel", "PDF"])
     args = parser.parse_args()
@@ -629,8 +653,9 @@ def main():
     load_dotenv()
     args = parse_args()
     if args.mode == "retrieve":
-        retriever_reponse, _ = retrieve(args)
+        retriever_reponse, references = retrieve(args)
         print(retriever_reponse)
+        print("References: {references}")
     elif args.mode == "index":
         index(args)
     else:

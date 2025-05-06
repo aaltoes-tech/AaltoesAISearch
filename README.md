@@ -15,7 +15,8 @@ Aaltoes AI Search is a Retrieval-Augmented Generation (RAG) application designed
 - **Concurrency and Parallelism**: Leverage `asyncio` and `multiprocessing` to speed up document indexing and retrieval.
 
 ## TODO
-- **Index files based on their type**. Parsing time depends on the type and length of a file.
+- **Tracking indexed documents**
+- **Group files based on their type and index them in order**.
 - **Agentic coding for spreadsheets**
 
 ## Prerequisites
