@@ -12,9 +12,9 @@ Aaltoes AI Search is a Retrieval-Augmented Generation (RAG) application designed
 - **Translation**: Translate Finnish documents to English for better accessibility.
 - **Gradio Interface**: User-friendly web interface for querying and exploring results.
 - **FastAPI Integration**: Expose indexing and retrieval functionalities via a FastAPI-based REST API.
+- **Concurrency and Parallelism**: Leverage `asyncio` and `multiprocessing` to speed up document indexing and retrieval.
 
 ## TODO
-- **Concurrency and Parallelism**
 - **Agentic coding for spreadsheets**
 
 ## Prerequisites
