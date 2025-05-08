@@ -15,8 +15,10 @@ wheels/
 # Virtual environments
 .venv
 
+# checkpoint files
+indexing_checkpoint.csv
+
 # other files
-rag_chromadb.py
 multi_vector_retriever.py
 
 # folders

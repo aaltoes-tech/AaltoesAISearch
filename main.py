@@ -7,6 +7,7 @@ from typing_extensions import Annotated, TypedDict
 
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
+import pandas as pd
 
 from dotenv import load_dotenv
 
@@ -18,7 +19,60 @@ from googleapiclient.errors import HttpError
 
 from config import APIConfig, PrfConfig, VALID_MIMETYPES, FILE_TYPE_MAP, VALID_YEARS, VALID_GEMINI_MODELS, VALID_OPENAI_MODELS
 
-prf_config = PrfConfig()
+import logging
+logging.basicConfig(level=logging.ERROR, format="%(levelname)s - %(message)s")
+
+prf_config = PrfConfig(max_num_cores=8, max_concurrent_indexing=16)
+
+
+class CheckpointTracker:
+    """A class to track indexed files and enable checkpoint recovery"""
+    def __init__(self, checkpoint_file:str="indexing_checkpoint.csv"):
+        self.checkpoint_file = checkpoint_file
+        if osp.exists(self.checkpoint_file):
+            # Load existing completed files from the checkpoint file
+            self.completed_files = pd.read_csv(self.checkpoint_file)
+        else:
+            # Create a new DataFrame if the checkpoint file does not exist
+            self.completed_files = pd.DataFrame(columns=["file_id", "file_name", "status", "timestamp"])
+
+        self.lock = asyncio.Lock()
+
+    async def mark_completed(self, file:dict, status:str):
+        try:
+            async with self.lock:
+                new_row = pd.DataFrame({
+                    "file_id": [file.get("id")],
+                    "file_name": [file.get("name")],
+                    "status": [status],
+                    "timestamp": [pd.Timestamp.now()]
+                })
+                # Append the new row to the existing DataFrame, avoiding duplicates
+                self.completed_files = pd.concat([
+                    self.completed_files[self.completed_files["file_id"] != file.get("id")],
+                    new_row
+                ])
+        
+                if status == "failed":
+                    # Save checkpoint on error, not on success to speed up indexing
+                    self.completed_files.to_csv(self.checkpoint_file, index=False)
+        except Exception as e:
+            logging.error(f"Error in mark_completed for file {file.get('name')}: {e}")
+            raise e
+    
+    def save_checkpoint_to_csv_no_lock(self):
+        """Save the completed files to a CSV file"""
+        try:
+            self.completed_files.to_csv(self.checkpoint_file, index=False)
+        except Exception as e:
+            logging.error(f"Error saving checkpoint to CSV: {e}")
+            raise e
+
+    def get_unprocessed_files(self, files_list:list[dict]) -> list[dict]:
+        """Get the list of unprocessed files"""
+        # Filter out completed files
+        completed_files = self.completed_files[self.completed_files["status"] == "completed"]["file_id"].values
+        return [ file for file in files_list if file.get("id") not in completed_files]
 
 
 def gdrive_auth():
@@ -115,6 +169,10 @@ def get_gdrive_files(args: APIConfig, creds) -> tuple[list[dict], dict]:
         
         years = VALID_YEARS if args.indx_years=="Full" else args.indx_years
         parent_folders = get_year_folders(years)
+        if parent_folders is None:
+            print(f"No folders found for {years=}")
+            return [], {}
+        
         parent_folders_filter = [f"""'{parent_folder.get("id")}' in parents""" for parent_folder in parent_folders]
         parent_folders_filter = " or ".join(parent_folders_filter)
 
@@ -151,10 +209,12 @@ def get_gdrive_files(args: APIConfig, creds) -> tuple[list[dict], dict]:
         id_to_year_map = {folder.get("id"): folder.get("name") for folder in parent_folders}
         return files, id_to_year_map
 
-    except HttpError as error:
-        raise error
+    except HttpError as e:
+        logging.error(f"HttpError getting gdrive files list: {e}")
+        return [], {}
     except Exception as e:
-        raise e
+        logging.error(f"Error getting gdrive files list: {e}")
+        return [], {}
 
 
 async def get_file_bytes_async(creds, file: dict) -> bytes:
@@ -189,18 +249,16 @@ async def get_file_bytes_async(creds, file: dict) -> bytes:
             done = False
             while done is False:
                 status, done = downloader.next_chunk()
-                # print(f"Download progress for file {file.get('name')}: {int(status.progress() * 100)}%")
-            # print(f"Download completed for file {file.get('name')}")
             downloaded_file.seek(0)  # Reset the file pointer
             return downloaded_file
             
         # Run the synchronous Google API call in a thread pool
         return await loop.run_in_executor(None, _download_file)
     except HttpError as e:
-        print(f"HttpError downloading file {file.get('name')}: {e}")
+        logging.error(f"HttpError downloading file {file.get('name')}: {e}")
         raise e
     except Exception as e:
-        print(f"Error downloading file {file.get('name')}: {e}")
+        logging.error(f"Error downloading file {file.get('name')}: {e}")
         raise e
 
 
@@ -210,11 +268,10 @@ def get_parsed_elements(file:dict, file_bytes:bytes) -> str:
     try:
         elements = partition(file=file_bytes, content_type=file.get("mimeType"))
         file_str = "\n\n".join([str(el) for el in elements]) # [:20])
-
         return file_str
     except Exception as e:
-        print(f"Error in get_parsed_elements for file {file.get('name')}: {e}")
-        raise e
+        logging.error(f"Error in get_parsed_elements for file {file.get('name')}: {e}")
+        return None # Don't raise an error here, otherwise it kills the whole common Process Pool
 
 
 async def generate_questions_keywords_async(args:APIConfig, file_str:str, file:dict) -> dict[dict]:
@@ -321,7 +378,7 @@ async def generate_questions_keywords_async(args:APIConfig, file_str:str, file:d
         return question_keys
     
     except Exception as e:
-        print(f"Error in generate_questions_keywords_async for file {file.get('name')}: {e}")
+        logging.error(f"Error in generate_questions_keywords_async for file {file.get('name')}: {e}")
         raise e
 
 
@@ -357,11 +414,13 @@ async def add_to_vector_store(file, question_key_pairs, vector_store):
         )
 
     except Exception as e:
-        print(f"Error adding to vector store for file {file.get('name')}: {e}")
+        logging.error(f"Error adding to vector store for file {file.get('name')}: {e}")
         raise e
 
 
-async def index_process_single_file(creds, file, args, id_to_year_map, process_semaphore, process_pool, vector_store):
+async def index_process_single_file(creds, file:dict, args:APIConfig, id_to_year_map:dict,
+                                    process_semaphore: asyncio.Semaphore, process_pool:ProcessPoolExecutor, 
+                                    vector_store:Any, checkpoint_tracker:CheckpointTracker):
     """Process a single file through the entire pipeline with semaphore control"""
     try:
         # Acquire the process semaphore to limit overall concurrent processing
@@ -382,6 +441,8 @@ async def index_process_single_file(creds, file, args, id_to_year_map, process_s
                 file,
                 file_bytes
             )
+            if file_str is None:
+                raise Exception()
             
             # Generate questions and keywords (I/O-bound LLM call)
             # print(f"Generating questions for {file.get('name')}...")
@@ -391,12 +452,16 @@ async def index_process_single_file(creds, file, args, id_to_year_map, process_s
             # print(f"Adding to vector store: {file.get('name')}...")
             await add_to_vector_store(file, question_key_pairs, vector_store)
             
-            print(f"Completed processing {file.get('name')}")
-            return {"file": file.get("name"), "status": "completed"}
+            # Mark file as completed in the checkpoint tracker
+            await checkpoint_tracker.mark_completed(file, "completed")
+
+            print(f"Completed indexing {file.get('name')}")
+            return {"file_id": file.get("id"), "file_name": file.get("name"), "status": "completed"}
         
     except Exception as e:
-        print(f"Error in process_single_file for {file.get('name')}: {e}")
-        raise e
+        logging.error(f"Error in process_single_file for {file.get('name')}: {e}")
+        await checkpoint_tracker.mark_completed(file, "failed")
+        return {"file_id": file.get("id"), "file_name": file.get("name"), "status": "failed"}
 
 
 async def index_async(args:APIConfig):
@@ -418,19 +483,30 @@ async def index_async(args:APIConfig):
     print("Preparing docs ...")
     files_list, id_to_year_map = get_gdrive_files(args, creds)
     if len(files_list) == 0:
-        print(f"        No files found")
+        print("No files found to index. Exiting.")
         return None
     print(f"Found {len(files_list)} files")
+
+    checkpoint_tracker = CheckpointTracker()  # Initialize checkpoint tracker
+
+    # Filter out already processed files if not explicitly requested to process all
+    if args.resume_checkpoint:
+        unprocessed_files = checkpoint_tracker.get_unprocessed_files(files_list)
+        print(f"Resuming from checkpoint: {len(files_list) - len(unprocessed_files)} files already indexed, {len(unprocessed_files)} remaining.")
+        files_to_index = unprocessed_files
+    else:
+        print(f"Indexing all {len(files_list)} files regardless of checkpoint.")
+        files_to_index = files_list
     
     # Create semaphores for concurrency control
     process_semaphore = asyncio.Semaphore(prf_config.max_concurrent_indexing)
-    # Create process pool for CPU-bound operations
+    # Create process pool for CPU-bound parsing operations
     process_pool = ProcessPoolExecutor(max_workers= prf_config.max_num_cores)
 
     try:
         # Create a task for each file
         tasks = []
-        for file in files_list:
+        for file in files_to_index:
             if file.get("name") == "test me":
                 continue
                 
@@ -442,7 +518,8 @@ async def index_async(args:APIConfig):
                     id_to_year_map,
                     process_semaphore, 
                     process_pool, 
-                    vector_store
+                    vector_store,
+                    checkpoint_tracker
                 )
             )
             tasks.append(task)
@@ -450,11 +527,16 @@ async def index_async(args:APIConfig):
         # Process all files concurrently with controlled concurrency
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
+        # Save checkpoint after all tasks are completed
+        checkpoint_tracker.save_checkpoint_to_csv_no_lock()
+
         # Check for any exceptions
         success_count = 0
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                print(f"Error processing file: {result}")
+                logging.error(f"Task failed with exception: {result}")
+            elif result.get("status") == "failed":
+                logging.warning(f"Failed to index file {result.get('file_name')}")
             else:
                 success_count += 1
         
@@ -462,36 +544,12 @@ async def index_async(args:APIConfig):
         return vector_store
     
     except Exception as e:
-        print(f"Error in index_async: {e}")
+        logging.error(f"Error in index_async: {e}")
         raise e
         
     finally:
         # Clean up resources
         process_pool.shutdown()
-
-        # # Docs linked to summaries
-        # for question_level in ["general", "specific"]:
-        #     # for each question level, we will add the questions to the vector store
-        #     # and also add the metadata to the vector store
-        #     # but for generation, we will also give the metadata to the LLM 
-        #     questions_docs = [
-        #         Document(page_content=question_key_pair['question'],
-        #                     metadata={"name": file.get("name"),
-        #                             "id": file.get("id"),
-        #                             "year": file.get("year_parent_name"),
-        #                             "mimeType": file.get("mimeType"),
-        #                             "level": question_level,
-        #                             # "keywords": question_key_pair['keywords'],
-        #                             # "potential_users": question_key_pair['potential_users'],
-        #                             })
-        #         for question_key_pair in question_key_pairs[f"{question_level}_question_keyword_pairs"]
-        #     ]
-        #     # ! ValueError: Expected metadata value for metadata in Chroma to be a str, int, float or bool, got keywords:List[str] which is a list in upsert.
-        #     # ! Try filtering complex metadata from the document using langchain_community.vectorstores.utils.filter_complex_metadata.
-        #     # TODO: for generation, we will also give the metadata to the LLM
-        #     # continue
-        # # continue
-        #     vector_store.add_documents(questions_docs)
 
 
 def index(args: APIConfig):
@@ -626,15 +684,16 @@ def retrieve(args:APIConfig):
 def parse_args() -> APIConfig:
     help_msg = """Aaltoes RAG with ChromaDB"""
     parser = argparse.ArgumentParser(description=help_msg, formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--mode", type=str, default="retrieve", choices=["index", "retrieve"], help="index or retrieve")
+    parser.add_argument("--mode", type=str, default="index", choices=["index", "retrieve"], help="index or retrieve")
     parser.add_argument("--model", type=str, default="gpt-4o", choices=VALID_GEMINI_MODELS + VALID_OPENAI_MODELS)
     parser.add_argument("--emb_func", type=str, default="openai", choices=["google", "openai"])  # feel free to add support for more embedding functions
     parser.add_argument("--indx_years", default=["2024"]) #"Full")
+    parser.add_argument("--file_type", default="PDF", choices=["Full", "MSWords", "MSPP", "MSExcel", "PDF"])
+    parser.add_argument("--resume_checkpoint", type=bool, default=True, help="Resume from checkpoint")
 
     parser.add_argument("--query", type=str, default="What was the purpose of Aaltoes?")
     parser.add_argument("--top_k", type=int, default=10)
     parser.add_argument("--retr_year", default="Full", choices=["2024", "2023", "2022", "2021", "2020", "Full"])
-    parser.add_argument("--file_type", default="Full", choices=["Full", "MSWords", "MSPP", "MSExcel", "PDF"])
     args = parser.parse_args()
     # Convert argparse.Namespace to APIConfig
     return APIConfig(
@@ -646,6 +705,7 @@ def parse_args() -> APIConfig:
         top_k=args.top_k,
         retr_year=args.retr_year,
         file_type=args.file_type,
+        resume_checkpoint=args.resume_checkpoint
     )
 
 

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Literal, Optional, Union, List, Dict, Any
 import os
 
@@ -36,13 +36,18 @@ class PrfConfig(BaseModel):
     max_concurrent_indexing:int = 16   # Adjust based on system memory and CPU
     
     @field_validator("max_num_cores")
-    def validate_mode(cls, value):
-        # the value must be between 0 and the number of cores, and also less than max_concurrent_indexing
+    def validate_max_num_cores(cls, value):
+        # the value must be between 0 and the number of cores
         if value < 0 or value > os.cpu_count():
             raise ValueError(f"Invalid number of cores. Choose between 0 and {os.cpu_count() - 1}.")
-        if value >= cls.max_concurrent_indexing:
-            raise ValueError(f"Invalid number of cores. Choose less than {cls.max_concurrent_indexing}.")
         return value
+    
+    @model_validator(mode="after")
+    def validate_model(cls, values):
+        # Ensure max_num_cores is less than max_concurrent_indexing
+        if values.max_num_cores >= values.max_concurrent_indexing:
+            raise ValueError(f"Invalid number of cores. Choose less than {cls.max_concurrent_indexing}.")
+        return values
 
 
 class APIConfig(BaseModel):
@@ -53,7 +58,8 @@ class APIConfig(BaseModel):
     query: str = "What was the purpose of Aaltoes?"
     top_k: int = 5
     retr_year: Union[int, str] = "Full"
-    file_type: str = "Full"
+    file_type: str = "Full",
+    resume_checkpoint: Optional[bool] = False
 
     @field_validator("mode")
     def validate_mode(cls, value):
@@ -90,3 +96,10 @@ class APIConfig(BaseModel):
         if value not in ["Full", "MSWords", "MSPP", "MSExcel", "PDF"]:
             raise ValueError(f"Invalid file type: {value}")
         return value
+    
+    @model_validator(mode="after")
+    def validate_resume_checkpoint(cls, values):
+        # To be only used with mode == "index"
+        if values.mode == "retrieve" and values.resume_checkpoint:
+            raise ValueError("resume_checkpoint can only be used with mode 'index'.")
+        return values
