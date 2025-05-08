@@ -24,8 +24,8 @@ VALID_YEARS = [
     "2021",
     "2020",
 ]  # Add more years as needed
-VALID_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0"]
-VALID_OPENAI_MODELS = ["gpt-4o", "gpt-3.5-turbo"]
+VALID_GEMINI_MODELS = []#["gemini-2.0-flash"]
+VALID_OPENAI_MODELS = ["gpt-4o"]
 
 # Set up concurrency controls
 class PrfConfig(BaseModel):

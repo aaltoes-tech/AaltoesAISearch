@@ -532,7 +532,7 @@ async def index_async(args:APIConfig):
 
         # Check for any exceptions
         success_count = 0
-        for i, result in enumerate(results):
+        for result in results:
             if isinstance(result, Exception):
                 logging.error(f"Task failed with exception: {result}")
             elif result.get("status") == "failed":
@@ -568,7 +568,7 @@ def get_unique_docs(documents: list) -> list:
     return unique_files_list
 
 
-async def retrieve_process_file(creds, file, ref_num, process_semaphore, process_pool):
+async def retrieve_process_single_file(creds, file, process_semaphore, process_pool):
     try:
         # Acquire the process semaphore to limit overall concurrent processing
         async with process_semaphore:
@@ -581,11 +581,13 @@ async def retrieve_process_file(creds, file, ref_num, process_semaphore, process
             file_str = await asyncio.get_event_loop().run_in_executor(
                 process_pool, get_parsed_elements, file, file_bytes
             )
+            if file_str is None:
+                raise Exception()
 
             # Format the parsed content for aggregation
-            return f"# Document reference {ref_num} - {file.get('name')} from year {file.get('year')}:\n{file_str}"
+            return f"""# Document reference "{file.get('name')}", Year {file.get('year')}:\n{file_str}"""
     except Exception as e:
-        print(f"Error processing file {file.get('name')}: {e}")
+        logging.error(f"Error processing file {file.get('name')}: {e}")
         return None
 
 
@@ -624,7 +626,7 @@ async def generate_retriever_reponse_async(args:APIConfig, joined_files_str:str)
         retriever_reponse = await retriever_chain.ainvoke({"query": args.query, "docs": joined_files_str})
         return retriever_reponse
     except Exception as e:
-        print(f"Error in generate_retriever_reponse_async: {e}")
+        logging.error(f"Error in generate_retriever_reponse_async: {e}")
         raise e
 
 
@@ -654,9 +656,9 @@ async def retrieve_async(args:APIConfig):
 
     try:
         # Create tasks for processing files
-        tasks = [retrieve_process_file(
-            creds, file, ref_num, process_semaphore, process_pool
-            ) for ref_num, file in enumerate(files_list, start=1) ]
+        tasks = [retrieve_process_single_file(
+            creds, file, process_semaphore, process_pool
+            ) for file in files_list ]
         parsed_files = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Filter out None results and aggregate parsed content
@@ -669,7 +671,7 @@ async def retrieve_async(args:APIConfig):
 
         return retriever_response, files_list
     except Exception as e:
-        print(f"Error in retrieve_async: {e}")
+        logging.error(f"Error in retrieve_async: {e}")
         raise e
     finally:
         # Clean up resources
