@@ -4,7 +4,8 @@ FROM python:3.12-slim
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    PATH="/root/.cargo/bin:${PATH}"
 
 # Install system dependencies required for unstructured[all-docs]
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,8 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+# Install uv using pip (more reliable in Docker)
+RUN pip install --no-cache-dir uv
 
 # Set working directory
 WORKDIR /app
