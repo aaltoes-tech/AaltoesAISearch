@@ -1,9 +1,10 @@
 [project]
 name = "aaltoesaisearch"
 version = "0.1.0"
-description = "Add your description here"
+description = "Aaltoes AI Search - RAG application for Aaltoes documents"
 readme = "README.md"
 requires-python = ">=3.12"
+py-modules = ["main", "fapi_app", "gr_app", "config"]
 dependencies = [
     "chromadb>=0.6.3",
     "fastapi[standard]>=0.115.12",
@@ -17,4 +18,15 @@ dependencies = [
     "langchain-google-genai>=2.1.4",
     "langchain-openai>=0.3.14",
     "unstructured[all-docs]>=0.17.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "*.py", # Include all .py files at the root
+    "README.md"
+    # pyproject.toml is included by default by Hatchling
 ]
